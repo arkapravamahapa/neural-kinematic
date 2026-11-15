@@ -64,10 +64,10 @@ function DoctorDashboard({ activeExercise }) {
 
     const ambientLight = new THREE.AmbientLight(0x94a3b8, 1.2);
     scene.add(ambientLight);
-    const keyLight = new THREE.DirectionalLight(0x22d3ee, 1.4);
+    const keyLight = new THREE.DirectionalLight(0x86efac, 1.4);
     keyLight.position.set(2, 3, 4);
     scene.add(keyLight);
-    const rimLight = new THREE.DirectionalLight(0x10b981, 1.0);
+    const rimLight = new THREE.DirectionalLight(0x34d399, 1.0);
     rimLight.position.set(-2, -1, -3);
     scene.add(rimLight);
 
@@ -107,7 +107,7 @@ function DoctorDashboard({ activeExercise }) {
     }
 
     poseBonesRef.current = [];
-    const poseLineMat = new THREE.LineBasicMaterial({ color: 0x22d3ee });
+    const poseLineMat = new THREE.LineBasicMaterial({ color: 0x86efac });
     POSE_CONNECTIONS.forEach(() => {
       const geom = new THREE.BufferGeometry();
       geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
@@ -118,7 +118,7 @@ function DoctorDashboard({ activeExercise }) {
     });
 
     handBonesRef.current = [];
-    const handLineMat = new THREE.LineBasicMaterial({ color: 0x22d3ee });
+    const handLineMat = new THREE.LineBasicMaterial({ color: 0x86efac });
     HAND_CONNECTIONS.forEach(() => {
       const geom = new THREE.BufferGeometry();
       geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
@@ -315,7 +315,7 @@ function DoctorDashboard({ activeExercise }) {
             </span>
           </p>
         </div>
-        <span className="text-xs font-mono text-cyan-400">
+        <span className="text-xs font-mono text-green-300">
           {liveMetrics ? `● Live (${liveMetrics.reps} reps)` : '○ Awaiting Stream'}
         </span>
       </div>
@@ -333,7 +333,7 @@ function DoctorDashboard({ activeExercise }) {
         </div>
         <div className="bg-slate-950/70 p-5 rounded-lg border border-slate-800 flex flex-col justify-center">
           <p className="text-xs font-medium text-slate-400 mb-1.5">Live Joint Angle</p>
-          <p className="text-4xl font-bold font-mono tabular-nums text-cyan-400">
+          <p className="text-4xl font-bold font-mono tabular-nums text-green-300">
             {liveMetrics ? (liveMetrics.smoothed_angle || 0).toFixed(1) : '0.0'}
             <span className="text-lg text-slate-400 ml-0.5">°</span>
           </p>
@@ -381,7 +381,7 @@ function DoctorDashboard({ activeExercise }) {
                     {new Date(session.created_at).toLocaleDateString()}
                   </td>
                   <td className="py-3 px-4 text-slate-100">{session.rep_count}</td>
-                  <td className="py-3 px-4 font-semibold text-cyan-400">
+                  <td className="py-3 px-4 font-semibold text-green-300">
                     {session.symmetry_score}%
                   </td>
                 </tr>

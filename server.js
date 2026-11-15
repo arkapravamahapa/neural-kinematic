@@ -51,16 +51,18 @@ app.post('/api/save_session', (req, res) => {
       rightMaxROM,
       symmetryScore,
       repCount,
+      notes,
     } = req.body || {};
 
     const record = {
       id: nextSessionId++,
-      patient_id: String(patient_id || '11111111-1111-1111-1111-111111111111'),
+      patient_id: String(patient_id || 'PT-1042'),
       exercise_id: String(exercise_id || 'knee_flexion_001'),
       left_max_rom: Number(leftMaxROM || 0),
       right_max_rom: Number(rightMaxROM || 0),
       symmetry_score: Number(symmetryScore || 0),
       rep_count: Number(repCount || 0),
+      notes: notes ? String(notes).slice(0, 500) : '',
       created_at: new Date().toISOString(),
     };
 

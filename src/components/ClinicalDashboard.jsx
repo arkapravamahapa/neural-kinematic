@@ -1,7 +1,22 @@
-import { useEffect, useRef } from 'react';
+import { useState } from 'react';
+import { jsPDF } from 'jspdf';
+import KinematicStreamChart from './KinematicStreamChart';
 
-function ClinicalDashboard({ metrics, exercise, telemetrySeries, onReset }) {
-  const graphCanvasRef = useRef(null);
+function ClinicalDashboard({
+  metrics,
+  exercise,
+  patientId,
+  telemetrySeries,
+  telemetryCount,
+  sessionStartTime,
+  targetReps,
+  onTargetRepsChange,
+  clinicalNotes,
+  onClinicalNotesChange,
+  onExportCSV,
+  onReset,
+}) {
+  const [exportStatus, setExportStatus] = useState('');
 
   const isHands = (metrics.tracker || exercise?.tracker) === 'hands';
 
@@ -11,10 +26,10 @@ function ClinicalDashboard({ metrics, exercise, telemetrySeries, onReset }) {
   if (metrics.status === 'tracking') {
     if (metrics.jerk_score < 15) {
       smoothnessLabel = 'Highly Stable';
-      smoothnessColor = 'text-emerald-400';
+      smoothnessColor = 'text-green-300';
     } else if (metrics.jerk_score < 40) {
       smoothnessLabel = 'Moderate Tremor';
-      smoothnessColor = 'text-amber-400';
+      smoothnessColor = 'text-amber-300';
     } else {
       smoothnessLabel = 'Unstable / Erratic';
       smoothnessColor = 'text-rose-400';
@@ -24,190 +39,200 @@ function ClinicalDashboard({ metrics, exercise, telemetrySeries, onReset }) {
   const dtwScore = metrics.dtw_consistency ?? 100;
   const isInconsistent = dtwScore < 75;
 
-  useEffect(() => {
-    const canvas = graphCanvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const dpr = window.devicePixelRatio || 1;
-    const width = canvas.clientWidth || 520;
-    const height = canvas.clientHeight || 156;
-
-    if (canvas.width !== Math.floor(width * dpr) || canvas.height !== Math.floor(height * dpr)) {
-      canvas.width = Math.floor(width * dpr);
-      canvas.height = Math.floor(height * dpr);
-    }
-
-    ctx.save();
-    ctx.scale(dpr, dpr);
-    ctx.clearRect(0, 0, width, height);
-
-    // Background grid
-    ctx.fillStyle = '#070B14';
-    ctx.fillRect(0, 0, width, height);
-
-    const padLeft = 36;
-    const padRight = 12;
-    const padTop = 14;
-    const padBottom = 18;
-    const plotW = width - padLeft - padRight;
-    const plotH = height - padTop - padBottom;
-
-    const maxY = isHands ? 110 : 180;
-    const minY = 0;
-
-    // Horizontal coordinate gridlines
-    ctx.strokeStyle = 'rgba(30, 41, 59, 0.9)';
-    ctx.lineWidth = 1;
-    ctx.font = '10px "JetBrains Mono", monospace';
-    ctx.fillStyle = '#64748B';
-    ctx.textAlign = 'right';
-    ctx.textBaseline = 'middle';
-
-    const ticks = isHands ? [0, 30, 60, 90] : [0, 45, 90, 135, 180];
-    for (const val of ticks) {
-      const y = padTop + plotH - ((val - minY) / (maxY - minY)) * plotH;
-      ctx.beginPath();
-      ctx.moveTo(padLeft, y);
-      ctx.lineTo(width - padRight, y);
-      ctx.stroke();
-      ctx.fillText(isHands ? `${val}%` : `${val}°`, padLeft - 6, y);
-    }
-
-    // Target ROM band
-    if (exercise) {
-      const tMin = Math.max(minY, Math.min(maxY, exercise.rom_target_min ?? 20));
-      const tMax = Math.max(minY, Math.min(maxY, exercise.rom_target_max ?? 160));
-      const yTop = padTop + plotH - ((tMax - minY) / (maxY - minY)) * plotH;
-      const yBot = padTop + plotH - ((tMin - minY) / (maxY - minY)) * plotH;
-
-      ctx.fillStyle = 'rgba(16, 185, 129, 0.06)';
-      ctx.fillRect(padLeft, yTop, plotW, Math.max(0, yBot - yTop));
-
-      ctx.save();
-      ctx.setLineDash([4, 4]);
-      ctx.strokeStyle = 'rgba(16, 185, 129, 0.35)';
-      ctx.beginPath();
-      ctx.moveTo(padLeft, yTop);
-      ctx.lineTo(width - padRight, yTop);
-      ctx.moveTo(padLeft, yBot);
-      ctx.lineTo(width - padRight, yBot);
-      ctx.stroke();
-      ctx.restore();
-    }
-
-    // Plot telemetry trace
-    if (telemetrySeries && telemetrySeries.length > 1) {
-      const maxPoints = 100;
-      const pts = telemetrySeries.slice(-maxPoints);
-      const stepX = plotW / (maxPoints - 1);
-      const startX = padLeft + (maxPoints - pts.length) * stepX;
-
-      const getVal = (p) => (isHands ? p.pinchAperture ?? 0 : p.angle ?? 0);
-
-      // Area gradient
-      const grad = ctx.createLinearGradient(0, padTop, 0, padTop + plotH);
-      grad.addColorStop(0, 'rgba(34, 211, 238, 0.25)');
-      grad.addColorStop(1, 'rgba(16, 185, 129, 0.0)');
-
-      ctx.beginPath();
-      pts.forEach((pt, idx) => {
-        const x = startX + idx * stepX;
-        const v = Math.max(minY, Math.min(maxY, getVal(pt)));
-        const y = padTop + plotH - ((v - minY) / (maxY - minY)) * plotH;
-        if (idx === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      });
-      ctx.lineTo(startX + (pts.length - 1) * stepX, padTop + plotH);
-      ctx.lineTo(startX, padTop + plotH);
-      ctx.closePath();
-      ctx.fillStyle = grad;
-      ctx.fill();
-
-      // Primary glowing waveform line
-      ctx.save();
-      ctx.strokeStyle = '#22D3EE';
-      ctx.lineWidth = 2;
-      ctx.shadowColor = 'rgba(34, 211, 238, 0.6)';
-      ctx.shadowBlur = 8;
-      ctx.beginPath();
-      pts.forEach((pt, idx) => {
-        const x = startX + idx * stepX;
-        const v = Math.max(minY, Math.min(maxY, getVal(pt)));
-        const y = padTop + plotH - ((v - minY) / (maxY - minY)) * plotH;
-        if (idx === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      });
-      ctx.stroke();
-      ctx.restore();
-
-      // Secondary MCP angle trace in Hands mode
-      if (isHands) {
-        ctx.save();
-        ctx.strokeStyle = 'rgba(16, 185, 129, 0.75)';
-        ctx.lineWidth = 1.5;
-        ctx.beginPath();
-        pts.forEach((pt, idx) => {
-          const x = startX + idx * stepX;
-          const v = Math.max(0, Math.min(180, pt.angle ?? 0));
-          const y = padTop + plotH - (v / 180) * plotH;
-          if (idx === 0) ctx.moveTo(x, y);
-          else ctx.lineTo(x, y);
-        });
-        ctx.stroke();
-        ctx.restore();
-      }
-
-      // Latest sample point marker
-      const lastPt = pts[pts.length - 1];
-      const lastX = startX + (pts.length - 1) * stepX;
-      const lastVal = Math.max(minY, Math.min(maxY, getVal(lastPt)));
-      const lastY = padTop + plotH - ((lastVal - minY) / (maxY - minY)) * plotH;
-      ctx.fillStyle = '#10B981';
-      ctx.beginPath();
-      ctx.arc(lastX, lastY, 3.5, 0, Math.PI * 2);
-      ctx.fill();
-    } else {
-      ctx.fillStyle = '#475569';
-      ctx.textAlign = 'center';
-      ctx.font = '11px "JetBrains Mono", monospace';
-      ctx.fillText('Awaiting live kinematic stream...', padLeft + plotW / 2, padTop + plotH / 2);
-    }
-
-    ctx.restore();
-  }, [telemetrySeries, isHands, exercise]);
-
   const primaryPercent = isHands
     ? Math.min(100, metrics.pinch_aperture || 0)
     : Math.min(100, ((metrics.smoothed_angle || 0) / 180) * 100);
 
+  const repGoalPercent = Math.min(
+    100,
+    Math.round(((metrics.reps || 0) / Math.max(1, targetReps || 10)) * 100)
+  );
+
+  const handleExportCSVClick = () => {
+    const exportedRows = onExportCSV?.();
+    if (exportedRows > 0) {
+      setExportStatus(`Exported ${exportedRows} telemetry frames to CSV`);
+    } else {
+      setExportStatus('Exported current clinical snapshot to CSV');
+    }
+    setTimeout(() => setExportStatus(''), 3500);
+  };
+
+  const handleExportPDFClick = () => {
+    const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+    const nowMs = Date.now();
+    const nowStr = new Date(nowMs).toLocaleString();
+    const elapsedSec = sessionStartTime
+      ? Math.max(0, Math.floor((nowMs - sessionStartTime) / 1000))
+      : 0;
+    const elapsedFormatted = `${String(Math.floor(elapsedSec / 60)).padStart(2, '0')}:${String(
+      elapsedSec % 60
+    ).padStart(2, '0')}`;
+
+    // Header
+    doc.setFillColor(15, 23, 42);
+    doc.rect(0, 0, 210, 32, 'F');
+    doc.setTextColor(134, 239, 172);
+    doc.setFontSize(16);
+    doc.text('Neural-Kinematic Clinical Assessment', 14, 15);
+    doc.setTextColor(203, 213, 225);
+    doc.setFontSize(9);
+    doc.text(`Generated: ${nowStr}   |   Patient ID: ${patientId || 'PT-1042'}`, 14, 23);
+
+    // Protocol & Summary
+    doc.setTextColor(15, 23, 42);
+    doc.setFontSize(12);
+    doc.text(`Protocol: ${exercise?.name || 'Knee Flexion (Squats)'}`, 14, 44);
+    doc.setFontSize(10);
+    doc.setTextColor(71, 85, 105);
+    doc.text(`Category: ${exercise?.category || 'Biomechanical Tracking'}`, 14, 51);
+    doc.text(
+      `Captured Samples: ${telemetryCount || telemetrySeries.length} frames   |   Session Elapsed: ${elapsedFormatted}`,
+      14,
+      57
+    );
+
+    // Key metrics grid
+    doc.setDrawColor(203, 213, 225);
+    doc.line(14, 63, 196, 63);
+    doc.setTextColor(15, 23, 42);
+    doc.setFontSize(11);
+    doc.text(`Completed Repetitions: ${metrics.reps || 0} / ${targetReps} target`, 14, 72);
+    doc.text(`DTW Form Consistency: ${dtwScore.toFixed(1)}%`, 110, 72);
+    doc.text(
+      `Smoothness (Jerk RMS): ${(metrics.jerk_score || 0).toFixed(2)} (${smoothnessLabel})`,
+      14,
+      80
+    );
+    if (isHands) {
+      doc.text(
+        `Pinch Span Range: ${(metrics.pinch_min_mm || 0).toFixed(1)} - ${(metrics.pinch_max_mm || 0).toFixed(1)} mm`,
+        110,
+        80
+      );
+      doc.text(
+        `MCP Joint ROM: ${(metrics.rom_min || 0).toFixed(1)} deg - ${(metrics.rom_max || 0).toFixed(1)} deg`,
+        14,
+        88
+      );
+    } else {
+      doc.text(
+        `Joint ROM: ${(metrics.rom_min || 0).toFixed(1)} deg (Flexion) - ${(metrics.rom_max || 0).toFixed(1)} deg (Extension)`,
+        14,
+        88
+      );
+    }
+
+    // Compensation alerts
+    const alertsText =
+      metrics.alerts && metrics.alerts.length > 0
+        ? metrics.alerts.join(', ')
+        : 'None detected during session';
+    doc.text(`Posture Compensations: ${alertsText}`, 14, 96);
+
+    // Vector Waveform Sparkline
+    doc.setFontSize(10);
+    doc.setTextColor(51, 65, 85);
+    doc.text(
+      isHands ? 'Live Pinch Aperture Trajectory (%)' : 'Live Joint Angle Trajectory (deg)',
+      14,
+      110
+    );
+    const boxX = 14;
+    const boxY = 114;
+    const boxW = 182;
+    const boxH = 52;
+    doc.setFillColor(248, 250, 252);
+    doc.rect(boxX, boxY, boxW, boxH, 'FD');
+
+    if (telemetrySeries && telemetrySeries.length > 1) {
+      const pts = telemetrySeries.slice(-100);
+      const maxVal = isHands ? 120 : 180;
+      doc.setDrawColor(16, 185, 129);
+      doc.setLineWidth(0.7);
+      for (let i = 1; i < pts.length; i++) {
+        const p0 = pts[i - 1];
+        const p1 = pts[i];
+        const v0 = Math.max(0, Math.min(maxVal, isHands ? p0.pinchAperture || 0 : p0.angle || 0));
+        const v1 = Math.max(0, Math.min(maxVal, isHands ? p1.pinchAperture || 0 : p1.angle || 0));
+        const x0 = boxX + ((i - 1) / (pts.length - 1)) * boxW;
+        const x1 = boxX + (i / (pts.length - 1)) * boxW;
+        const y0 = boxY + boxH - (v0 / maxVal) * boxH;
+        const y1 = boxY + boxH - (v1 / maxVal) * boxH;
+        doc.line(x0, y0, x1, y1);
+      }
+    } else {
+      doc.setFontSize(9);
+      doc.setTextColor(100, 116, 139);
+      doc.text('Insufficient live stream samples for trajectory plot.', 20, 140);
+    }
+
+    // Clinician Notes
+    doc.setTextColor(15, 23, 42);
+    doc.setFontSize(11);
+    doc.text('Clinician Notes:', 14, 180);
+    doc.setFontSize(10);
+    doc.setTextColor(71, 85, 105);
+    const wrappedNotes = doc.splitTextToSize(
+      clinicalNotes?.trim() || 'No additional clinician observations recorded.',
+      180
+    );
+    doc.text(wrappedNotes, 14, 187);
+
+    doc.save(`clinical_report_${exercise?.key || 'session'}_${patientId || 'PT-1042'}_${Date.now()}.pdf`);
+    setExportStatus('Clinical PDF report downloaded');
+    setTimeout(() => setExportStatus(''), 3500);
+  };
+
   return (
     <div className="bg-slate-900/80 backdrop-blur-md p-6 rounded-xl border border-slate-800">
-      <div className="flex flex-wrap justify-between items-center gap-4 mb-6 border-b border-slate-800 pb-4">
+      <div className="flex flex-wrap justify-between items-center gap-3 mb-5 border-b border-slate-800 pb-4">
         <div>
           <h3 className="text-lg font-semibold text-slate-100 tracking-tight">
             Biomechanical Telemetry
           </h3>
-          <p className="text-xs text-slate-400 mt-0.5">
-            {exercise?.name || 'Knee Flexion (Squats)'}
+          <p className="text-xs text-slate-400 mt-0.5 font-mono tabular-nums">
+            <span>{exercise?.name || 'Knee Flexion (Squats)'}</span>
             <span className="mx-1.5 text-slate-600" aria-hidden="true">·</span>
-            <span className="font-mono text-cyan-400">
-              {metrics.status === 'tracking' ? '● Active Signal' : '○ Buffering'}
+            <span className="text-green-300">
+              {metrics.status === 'tracking' ? '● Active' : '○ Buffering'}
             </span>
+            <span className="mx-1.5 text-slate-600" aria-hidden="true">·</span>
+            <span>{telemetryCount || telemetrySeries.length} frames</span>
           </p>
         </div>
-        <button
-          onClick={onReset}
-          className="bg-emerald-500 hover:bg-emerald-400 text-slate-950 px-4 py-2 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
-        >
-          Save &amp; Export CSV
-        </button>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={handleExportCSVClick}
+            className="bg-slate-950 hover:bg-slate-800 text-green-300 border border-green-300/40 px-3 py-2 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-green-300"
+          >
+            Export CSV
+          </button>
+          <button
+            onClick={handleExportPDFClick}
+            className="bg-slate-950 hover:bg-slate-800 text-slate-200 border border-slate-700 px-3 py-2 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-green-300"
+          >
+            Export PDF
+          </button>
+          <button
+            onClick={onReset}
+            className="bg-green-300 hover:bg-green-200 text-slate-950 px-3.5 py-2 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-green-300"
+          >
+            Save &amp; Clear
+          </button>
+        </div>
       </div>
+
+      {exportStatus && (
+        <div className="mb-4 bg-green-300/10 border border-green-300/30 text-green-300 px-3.5 py-2 rounded-lg text-xs font-mono">
+          {exportStatus}
+        </div>
+      )}
 
       {metrics.alerts && metrics.alerts.length > 0 && (
         <div className="mb-5 bg-amber-500/10 border border-amber-500/40 px-4 py-3 rounded-lg flex items-start gap-3">
-          <svg className="h-5 w-5 text-amber-400 shrink-0 mt-0.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+          <svg className="h-5 w-5 text-amber-300 shrink-0 mt-0.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
             <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
           </svg>
           <div>
@@ -219,13 +244,14 @@ function ClinicalDashboard({ metrics, exercise, telemetrySeries, onReset }) {
         </div>
       )}
 
-      <div className="grid grid-cols-3 gap-4 mb-6">
+      <div className="grid grid-cols-3 gap-4 mb-5">
         <div className="bg-slate-950/70 p-4 rounded-lg border border-slate-800">
           <p className="text-xs font-medium text-slate-400 mb-1">Repetitions</p>
           <p className="text-3xl font-bold font-mono tabular-nums text-slate-50">
             {metrics.reps || 0}
+            <span className="text-sm font-normal text-slate-500 ml-1">/ {targetReps}</span>
           </p>
-          <span className="text-xs text-cyan-400 font-mono mt-1 block">
+          <span className="text-xs text-green-300 font-mono mt-1 block">
             {isHands ? 'Pinch Cycles' : 'Verified Reps'}
           </span>
         </div>
@@ -245,33 +271,66 @@ function ClinicalDashboard({ metrics, exercise, telemetrySeries, onReset }) {
           <p className={`text-3xl font-bold font-mono tabular-nums ${isInconsistent ? 'text-rose-300' : 'text-slate-50'}`}>
             {dtwScore.toFixed(1)}<span className="text-sm text-slate-400 ml-0.5">%</span>
           </p>
-          <span className={`text-xs font-medium mt-1 block ${isInconsistent ? 'text-rose-400' : 'text-emerald-400'}`}>
+          <span className={`text-xs font-medium mt-1 block ${isInconsistent ? 'text-rose-400' : 'text-green-300'}`}>
             {isInconsistent ? 'Form Degrading' : 'Consistent'}
           </span>
         </div>
       </div>
 
-      {/* Real-time Savitzky-Golay Kinematic Oscilloscope */}
-      <div className="mb-6">
+      {/* Repetition Target Progress & Goal Control */}
+      <div className="mb-5 bg-slate-950/60 border border-slate-800 rounded-lg px-4 py-3">
+        <div className="flex items-center justify-between text-xs mb-2">
+          <span className="text-slate-300 font-medium">
+            Set Target Goal ({repGoalPercent}% complete)
+          </span>
+          <div className="flex items-center gap-1.5 font-mono">
+            {[5, 10, 15, 20].map((goal) => (
+              <button
+                key={goal}
+                type="button"
+                onClick={() => onTargetRepsChange?.(goal)}
+                className={`px-2 py-0.5 rounded text-xs transition-colors ${
+                  targetReps === goal
+                    ? 'bg-green-300 text-slate-950 font-semibold'
+                    : 'bg-slate-900 text-slate-400 hover:text-slate-200 border border-slate-800'
+                }`}
+              >
+                {goal}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="w-full bg-slate-900 rounded-full h-1.5 overflow-hidden">
+          <div
+            className="bg-green-300 h-full rounded-full transition-all duration-150"
+            style={{ width: `${repGoalPercent}%` }}
+          />
+        </div>
+      </div>
+
+      {/* Real-time Recharts Kinematic Stream Plot */}
+      <div className="mb-5">
         <div className="flex items-center justify-between text-xs mb-2">
           <span className="font-medium text-slate-300">
-            {isHands ? 'Real-Time Pinch Aperture & MCP Waveform' : 'Real-Time Joint Angle Waveform'}
+            {isHands ? 'Live Pinch Aperture & MCP Stream' : 'Live Joint Angle Stream'}
           </span>
           <span className="font-mono tabular-nums text-slate-400">
             {isHands ? (
               <>
-                <span className="text-cyan-400">Pinch {(metrics.pinch_distance_mm || 0).toFixed(1)} mm</span>
+                <span className="text-green-300">Pinch {(metrics.pinch_distance_mm || 0).toFixed(1)} mm</span>
                 <span className="mx-1.5 text-slate-600">·</span>
-                <span className="text-emerald-400">MCP {(metrics.smoothed_angle || 0).toFixed(1)}°</span>
+                <span className="text-amber-300">MCP {(metrics.smoothed_angle || 0).toFixed(1)}°</span>
               </>
             ) : (
-              <span className="text-cyan-400">Savitzky-Golay {(metrics.smoothed_angle || 0).toFixed(1)}°</span>
+              <span className="text-green-300">Savitzky-Golay {(metrics.smoothed_angle || 0).toFixed(1)}°</span>
             )}
           </span>
         </div>
-        <div className="rounded-lg overflow-hidden border border-slate-800 bg-slate-950">
-          <canvas ref={graphCanvasRef} className="w-full h-36 block cursor-crosshair" />
-        </div>
+        <KinematicStreamChart
+          telemetrySeries={telemetrySeries}
+          exercise={exercise}
+          isHands={isHands}
+        />
       </div>
 
       {/* Articulation Range Bar */}
@@ -281,7 +340,7 @@ function ClinicalDashboard({ metrics, exercise, telemetrySeries, onReset }) {
             <span className="font-medium text-slate-300">
               {isHands ? 'Thumb–Index Pinch Aperture' : 'Smoothed Articulation Angle'}
             </span>
-            <span className="font-mono tabular-nums font-semibold text-cyan-400">
+            <span className="font-mono tabular-nums font-semibold text-green-300">
               {isHands
                 ? `${(metrics.pinch_aperture || 0).toFixed(1)}% (${(metrics.pinch_distance_mm || 0).toFixed(1)} mm)`
                 : `${(metrics.smoothed_angle || 0).toFixed(1)}°`}
@@ -289,7 +348,7 @@ function ClinicalDashboard({ metrics, exercise, telemetrySeries, onReset }) {
           </div>
           <div className="w-full bg-slate-950 border border-slate-800 rounded-full h-2 overflow-hidden">
             <div
-              className="bg-gradient-to-r from-emerald-400 to-cyan-400 h-full rounded-full transition-all duration-75"
+              className="bg-gradient-to-r from-emerald-500 to-green-300 h-full rounded-full transition-all duration-75"
               style={{ width: `${primaryPercent}%` }}
             />
           </div>
@@ -299,7 +358,7 @@ function ClinicalDashboard({ metrics, exercise, telemetrySeries, onReset }) {
           {isHands ? (
             <>
               <span className="text-slate-400">
-                Min Pinch Span: <span className="font-semibold text-emerald-400">{(metrics.pinch_min_mm || 0).toFixed(1)} mm</span>
+                Min Pinch Span: <span className="font-semibold text-green-300">{(metrics.pinch_min_mm || 0).toFixed(1)} mm</span>
               </span>
               <span className="text-slate-400">
                 MCP ROM Range: <span className="font-semibold text-slate-200">{(metrics.rom_min || 0).toFixed(1)}° – {(metrics.rom_max || 0).toFixed(1)}°</span>
@@ -308,13 +367,28 @@ function ClinicalDashboard({ metrics, exercise, telemetrySeries, onReset }) {
           ) : (
             <>
               <span className="text-slate-400">
-                Max Extension: <span className="font-semibold text-emerald-400">{(metrics.rom_max || 0).toFixed(1)}°</span>
+                Max Extension: <span className="font-semibold text-green-300">{(metrics.rom_max || 0).toFixed(1)}°</span>
               </span>
               <span className="text-slate-400">
-                Max Flexion: <span className="font-semibold text-cyan-400">{(metrics.rom_min || 0).toFixed(1)}°</span>
+                Max Flexion: <span className="font-semibold text-emerald-400">{(metrics.rom_min || 0).toFixed(1)}°</span>
               </span>
             </>
           )}
+        </div>
+
+        {/* Clinician Session Notes */}
+        <div className="pt-2">
+          <label htmlFor="clinical-notes" className="block text-xs font-medium text-slate-400 mb-1.5">
+            Clinician Observations (Included in PDF &amp; Saved Record)
+          </label>
+          <input
+            id="clinical-notes"
+            type="text"
+            value={clinicalNotes || ''}
+            onChange={(e) => onClinicalNotesChange?.(e.target.value)}
+            placeholder="e.g., Mild pain reported at 90 deg knee flexion; steady cadence..."
+            className="w-full bg-slate-950 border border-slate-800 text-slate-100 placeholder:text-slate-600 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-green-300"
+          />
         </div>
       </div>
     </div>

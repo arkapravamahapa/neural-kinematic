@@ -13,7 +13,17 @@
     "rep_trigger_prominence": 45,
     "min_rep_duration_sec": 0.35,
     "unit": "deg",
-    "compensation_checks": ["hip_shift", "trunk_lean"]
+    "compensation_checks": ["hip_shift", "trunk_lean"],
+    "guidance": {
+      "framing": "Stand 2–2.5 m from the camera at a slight 30° angle so hip, knee, and ankle stay visible.",
+      "calibration_instruction": "Stand upright with feet shoulder-width apart and extend both arms horizontally at shoulder level (T-pose) for 3 seconds.",
+      "steps": [
+        "Begin standing tall with knees near full extension (~165°–175°).",
+        "Hinge at the hips and bend knees smoothly toward 70°–95° without letting knees collapse inward.",
+        "Pause briefly at bottom flexion, then drive evenly through both heels back to standing."
+      ],
+      "form_cues": "Keep torso upright (avoids Trunk Lean alert) and hips level (avoids Lateral Pelvic Shift)."
+    }
   },
   "elbow_flexion": {
     "id": "elbow_flexion_001",
@@ -29,7 +39,17 @@
     "rep_trigger_prominence": 45,
     "min_rep_duration_sec": 0.3,
     "unit": "deg",
-    "compensation_checks": ["shoulder_elevation"]
+    "compensation_checks": ["shoulder_elevation"],
+    "guidance": {
+      "framing": "Face the camera 1.5–2 m back with your upper torso, left shoulder, elbow, and wrist clearly framed.",
+      "calibration_instruction": "Stand tall and hold a horizontal T-pose for 3 seconds to normalize shoulder-to-hip proportions.",
+      "steps": [
+        "Relax shoulders down and start with the elbow extended (~160°–170°) beside your torso.",
+        "Flex the elbow smoothly, bringing the wrist upward toward the shoulder (~35°–50°).",
+        "Lower the forearm under control back to full extension without swinging."
+      ],
+      "form_cues": "Keep your collarbone level and avoid hiking the shoulder upward during peak flexion."
+    }
   },
   "shoulder_abduction": {
     "id": "shoulder_abduction_001",
@@ -45,7 +65,17 @@
     "rep_trigger_prominence": 35,
     "min_rep_duration_sec": 0.35,
     "unit": "deg",
-    "compensation_checks": ["shoulder_elevation", "trunk_lean"]
+    "compensation_checks": ["shoulder_elevation", "trunk_lean"],
+    "guidance": {
+      "framing": "Stand straight facing the camera 1.5–2 m away so both shoulders and extended arms fit inside the frame.",
+      "calibration_instruction": "Hold a steady horizontal T-pose for 3 seconds so shoulder baseline span and trunk midline are calibrated.",
+      "steps": [
+        "Start with arms resting comfortably at your sides (~95° shoulder-to-elbow baseline).",
+        "Raise your left arm laterally outward with a straight elbow up to shoulder height (~170°–175°).",
+        "Hold 1 second at top abduction, then lower smoothly back to your side."
+      ],
+      "form_cues": "Avoid leaning your torso sideways or shrugging the shoulder toward your ear."
+    }
   },
   "finger_pinch": {
     "id": "finger_pinch_001",
@@ -63,6 +93,16 @@
     "rep_trigger_prominence": 25,
     "min_rep_duration_sec": 0.2,
     "unit": "deg",
-    "compensation_checks": ["wrist_deviation"]
+    "compensation_checks": ["wrist_deviation"],
+    "guidance": {
+      "framing": "Position one hand 35–55 cm in front of the camera with good lighting and an uncluttered background.",
+      "calibration_instruction": "Hold your palm open and steady facing the camera for 3 seconds to normalize palm scale and finger aperture.",
+      "steps": [
+        "Start with palm neutral and thumb & index finger comfortably open (~70–90% aperture).",
+        "Flex the index MCP/PIP joints and touch thumb tip (#4) cleanly to index tip (#8).",
+        "Open smoothly back to the starting neutral aperture to complete each pinch cycle."
+      ],
+      "form_cues": "Keep the wrist aligned vertically with the forearm to avoid Excessive Wrist Deviation alerts."
+    }
   }
 }
