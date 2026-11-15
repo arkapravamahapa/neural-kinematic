@@ -59,19 +59,19 @@ function DoctorDashboard({ activeExercise }) {
     }
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x020617);
-    scene.fog = new THREE.FogExp2(0x020617, 0.08);
+    scene.background = new THREE.Color(0xf0fdf4);
+    scene.fog = new THREE.FogExp2(0xf0fdf4, 0.05);
 
-    const ambientLight = new THREE.AmbientLight(0x94a3b8, 1.2);
+    const ambientLight = new THREE.AmbientLight(0xffffff, 1.3);
     scene.add(ambientLight);
-    const keyLight = new THREE.DirectionalLight(0x86efac, 1.4);
+    const keyLight = new THREE.DirectionalLight(0x10b981, 1.1);
     keyLight.position.set(2, 3, 4);
     scene.add(keyLight);
-    const rimLight = new THREE.DirectionalLight(0x34d399, 1.0);
+    const rimLight = new THREE.DirectionalLight(0x94a3b8, 0.9);
     rimLight.position.set(-2, -1, -3);
     scene.add(rimLight);
 
-    const gridHelper = new THREE.GridHelper(5, 24, 0x1e293b, 0x0f172a);
+    const gridHelper = new THREE.GridHelper(5, 24, 0x86efac, 0xbbf7d0);
     gridHelper.position.y = -1.4;
     scene.add(gridHelper);
 
@@ -92,10 +92,10 @@ function DoctorDashboard({ activeExercise }) {
 
     const jointGeometry = new THREE.SphereGeometry(0.036, 16, 16);
     const jointMaterial = new THREE.MeshStandardMaterial({
-      color: 0x10b981,
-      emissive: 0x065f46,
+      color: 0x059669,
+      emissive: 0x064e3b,
       roughness: 0.35,
-      metalness: 0.2,
+      metalness: 0.15,
     });
 
     jointsRef.current = [];
@@ -107,7 +107,7 @@ function DoctorDashboard({ activeExercise }) {
     }
 
     poseBonesRef.current = [];
-    const poseLineMat = new THREE.LineBasicMaterial({ color: 0x86efac });
+    const poseLineMat = new THREE.LineBasicMaterial({ color: 0x16a34a });
     POSE_CONNECTIONS.forEach(() => {
       const geom = new THREE.BufferGeometry();
       geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
@@ -118,7 +118,7 @@ function DoctorDashboard({ activeExercise }) {
     });
 
     handBonesRef.current = [];
-    const handLineMat = new THREE.LineBasicMaterial({ color: 0x86efac });
+    const handLineMat = new THREE.LineBasicMaterial({ color: 0x16a34a });
     HAND_CONNECTIONS.forEach(() => {
       const geom = new THREE.BufferGeometry();
       geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
@@ -130,7 +130,7 @@ function DoctorDashboard({ activeExercise }) {
 
     const pinchGeom = new THREE.BufferGeometry();
     pinchGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
-    const pinchMat = new THREE.LineBasicMaterial({ color: 0xf59e0b });
+    const pinchMat = new THREE.LineBasicMaterial({ color: 0xd97706 });
     const pinchLine = new THREE.Line(pinchGeom, pinchMat);
     pinchLine.visible = false;
     scene.add(pinchLine);
@@ -175,7 +175,6 @@ function DoctorDashboard({ activeExercise }) {
     const isHands = trackerMode === 'hands';
 
     if (isHands) {
-      // Center around middle MCP (9) and scale up for clear hand articulation
       const anchor = landmarks[9] || landmarks[0];
       const scale = 3.8;
 
@@ -301,51 +300,51 @@ function DoctorDashboard({ activeExercise }) {
       : 0;
 
   return (
-    <div className="bg-slate-900/80 backdrop-blur-md p-6 rounded-xl border border-slate-800">
-      <div className="flex flex-wrap justify-between items-center gap-4 mb-6 border-b border-slate-800 pb-4">
+    <div className="bg-green-50 p-6 rounded-xl border border-green-200">
+      <div className="flex flex-wrap justify-between items-center gap-4 mb-6 border-b border-green-200 pb-4">
         <div>
-          <h2 className="text-xl font-semibold text-slate-100 tracking-tight">
+          <h2 className="text-xl font-semibold text-slate-900 tracking-tight">
             Clinical Command Center
           </h2>
-          <p className="text-xs text-slate-400 mt-0.5">
+          <p className="text-xs text-slate-600 mt-0.5">
             Cohort Outcomes
-            <span className="mx-1.5 text-slate-600" aria-hidden="true">·</span>
-            <span className="font-mono text-emerald-400">
+            <span className="mx-1.5 text-green-300" aria-hidden="true">·</span>
+            <span className="font-mono text-emerald-800 font-medium">
               {liveTracker === 'hands' ? '21-Joint Hand Reconstruction' : '33-Joint Full-Body Reconstruction'}
             </span>
           </p>
         </div>
-        <span className="text-xs font-mono text-green-300">
+        <span className="text-xs font-mono text-emerald-800 font-medium">
           {liveMetrics ? `● Live (${liveMetrics.reps} reps)` : '○ Awaiting Stream'}
         </span>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-        <div className="bg-slate-950/70 p-5 rounded-lg border border-slate-800 flex flex-col justify-center">
-          <p className="text-xs font-medium text-slate-400 mb-1.5">Total Clinical Sessions</p>
-          <p className="text-4xl font-bold font-mono tabular-nums text-slate-50">{totalSessions}</p>
+        <div className="bg-green-100/55 p-5 rounded-lg border border-green-200 flex flex-col justify-center">
+          <p className="text-xs font-medium text-slate-600 mb-1.5">Total Clinical Sessions</p>
+          <p className="text-4xl font-bold font-mono tabular-nums text-slate-900">{totalSessions}</p>
         </div>
-        <div className="bg-slate-950/70 p-5 rounded-lg border border-slate-800 flex flex-col justify-center">
-          <p className="text-xs font-medium text-slate-400 mb-1.5">Cohort Form Consistency</p>
-          <p className="text-4xl font-bold font-mono tabular-nums text-emerald-400">
-            {avgSymmetry}<span className="text-lg text-slate-400 ml-0.5">%</span>
+        <div className="bg-green-100/55 p-5 rounded-lg border border-green-200 flex flex-col justify-center">
+          <p className="text-xs font-medium text-slate-600 mb-1.5">Cohort Form Consistency</p>
+          <p className="text-4xl font-bold font-mono tabular-nums text-emerald-800">
+            {avgSymmetry}<span className="text-lg text-slate-600 ml-0.5">%</span>
           </p>
         </div>
-        <div className="bg-slate-950/70 p-5 rounded-lg border border-slate-800 flex flex-col justify-center">
-          <p className="text-xs font-medium text-slate-400 mb-1.5">Live Joint Angle</p>
-          <p className="text-4xl font-bold font-mono tabular-nums text-green-300">
+        <div className="bg-green-100/55 p-5 rounded-lg border border-green-200 flex flex-col justify-center">
+          <p className="text-xs font-medium text-slate-600 mb-1.5">Live Joint Angle</p>
+          <p className="text-4xl font-bold font-mono tabular-nums text-green-800">
             {liveMetrics ? (liveMetrics.smoothed_angle || 0).toFixed(1) : '0.0'}
-            <span className="text-lg text-slate-400 ml-0.5">°</span>
+            <span className="text-lg text-slate-600 ml-0.5">°</span>
           </p>
         </div>
       </div>
 
-      <div className="bg-slate-950 rounded-lg overflow-hidden relative h-72 border border-slate-800 mb-6">
-        <div className="absolute top-3 left-3 z-10 bg-slate-950/80 backdrop-blur-sm border border-slate-800 px-3 py-1.5 rounded-md text-xs font-mono text-slate-200 pointer-events-none">
+      <div className="bg-green-50 rounded-lg overflow-hidden relative h-72 border border-green-200 mb-6">
+        <div className="absolute top-3 left-3 z-10 bg-green-50/90 backdrop-blur-sm border border-green-200 px-3 py-1.5 rounded-md text-xs font-mono text-slate-800 pointer-events-none">
           3D Spatial Feed · {liveTracker === 'hands' ? 'Hand Kinematics' : 'Body Pose'}
         </div>
         {webglError ? (
-          <div className="w-full h-full flex items-center justify-center text-xs font-mono text-slate-400">
+          <div className="w-full h-full flex items-center justify-center text-xs font-mono text-slate-600">
             WebGL 3D context unavailable in this browser session.
           </div>
         ) : (
@@ -353,10 +352,10 @@ function DoctorDashboard({ activeExercise }) {
         )}
       </div>
 
-      <h3 className="text-xs font-semibold text-slate-400 mb-3">Recent Cohort Sessions</h3>
-      <div className="overflow-x-auto bg-slate-950/60 rounded-lg border border-slate-800">
+      <h3 className="text-xs font-semibold text-slate-700 mb-3">Recent Cohort Sessions</h3>
+      <div className="overflow-x-auto bg-green-50/70 rounded-lg border border-green-200">
         <table className="min-w-full text-left text-xs">
-          <thead className="bg-slate-900/90 text-slate-400 border-b border-slate-800">
+          <thead className="bg-green-100/70 text-slate-700 border-b border-green-200">
             <tr>
               <th className="py-3 px-4 font-medium">Patient ID</th>
               <th className="py-3 px-4 font-medium">Protocol</th>
@@ -365,23 +364,23 @@ function DoctorDashboard({ activeExercise }) {
               <th className="py-3 px-4 font-medium">Form Match</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-slate-800/80 font-mono tabular-nums">
+          <tbody className="divide-y divide-green-200/80 font-mono tabular-nums">
             {populationData.length === 0 ? (
               <tr>
-                <td colSpan="5" className="py-6 text-center text-slate-500 font-sans">
+                <td colSpan="5" className="py-6 text-center text-slate-600 font-sans">
                   No recorded cohort sessions yet. Save a session from Patient Capture.
                 </td>
               </tr>
             ) : (
               populationData.slice(0, 6).map((session) => (
-                <tr key={session.id} className="hover:bg-slate-900/50 transition-colors">
-                  <td className="py-3 px-4 text-slate-400">{session.patient_id.substring(0, 8)}...</td>
-                  <td className="py-3 px-4 text-slate-200">{session.exercise_id}</td>
-                  <td className="py-3 px-4 text-slate-400">
+                <tr key={session.id} className="hover:bg-green-100/50 transition-colors">
+                  <td className="py-3 px-4 text-slate-600">{session.patient_id.substring(0, 8)}...</td>
+                  <td className="py-3 px-4 text-slate-800">{session.exercise_id}</td>
+                  <td className="py-3 px-4 text-slate-600">
                     {new Date(session.created_at).toLocaleDateString()}
                   </td>
-                  <td className="py-3 px-4 text-slate-100">{session.rep_count}</td>
-                  <td className="py-3 px-4 font-semibold text-green-300">
+                  <td className="py-3 px-4 text-slate-900">{session.rep_count}</td>
+                  <td className="py-3 px-4 font-semibold text-emerald-800">
                     {session.symmetry_score}%
                   </td>
                 </tr>

@@ -10,11 +10,11 @@ function CalibrationWizard({
 
   if (status === 'calibrated') {
     return (
-      <div className="mb-3 flex flex-wrap items-center justify-between gap-2 bg-slate-950/70 border border-slate-800 rounded-lg px-3.5 py-2 text-xs font-mono">
-        <div className="flex items-center gap-2 text-green-300">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2 bg-green-100/70 border border-green-200 rounded-lg px-3.5 py-2 text-xs font-mono">
+        <div className="flex items-center gap-2 text-emerald-800">
           <span>● {profile?.skipped ? 'Direct Tracking (Uncalibrated)' : 'Coordinates Normalized'}</span>
           {!profile?.skipped && profile && (
-            <span className="text-slate-400">
+            <span className="text-slate-600">
               · Scale {profile.scale.toFixed(2)} ({profile.sampleCount} samples)
             </span>
           )}
@@ -22,7 +22,7 @@ function CalibrationWizard({
         <button
           type="button"
           onClick={onRecalibrate}
-          className="text-slate-300 hover:text-green-300 border border-slate-700 hover:border-green-300/50 px-2.5 py-1 rounded transition-colors"
+          className="text-slate-800 hover:text-emerald-800 bg-green-50 border border-green-300 hover:border-emerald-500 px-2.5 py-1 rounded transition-colors"
         >
           Recalibrate
         </button>
@@ -37,15 +37,15 @@ function CalibrationWizard({
   ];
 
   return (
-    <div className="mb-3 bg-slate-950/90 border border-green-300/35 rounded-lg p-3.5">
+    <div className="mb-3 bg-green-100/60 border border-green-300 rounded-lg p-3.5">
       <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
-        <span className="text-xs font-semibold text-green-300">
+        <span className="text-xs font-semibold text-emerald-900">
           {isHands ? 'Hand Coordinate Calibration' : '3-Second T-Pose Calibration'}
         </span>
         <button
           type="button"
           onClick={onSkipCalibration}
-          className="text-xs font-mono text-slate-400 hover:text-slate-200 underline underline-offset-2"
+          className="text-xs font-mono text-slate-700 hover:text-slate-950 underline underline-offset-2"
         >
           Skip Calibration
         </button>
@@ -61,10 +61,10 @@ function CalibrationWizard({
               key={s.id}
               className={`px-2.5 py-1.5 rounded border text-xs font-mono truncate ${
                 active
-                  ? 'bg-green-300/15 border-green-300/60 text-green-300 font-semibold'
+                  ? 'bg-green-300/80 border-emerald-600 text-slate-950 font-semibold'
                   : done
-                  ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
-                  : 'bg-slate-900 border-slate-800 text-slate-500'
+                  ? 'bg-green-200 border-green-400 text-emerald-900'
+                  : 'bg-green-50 border-green-200 text-slate-600'
               }`}
             >
               {s.label}
@@ -76,16 +76,16 @@ function CalibrationWizard({
       {/* Hold Progress Bar & Live Coaching Feedback */}
       <div className="space-y-1.5">
         <div className="flex items-center justify-between text-xs font-mono">
-          <span className={step === 2 ? 'text-green-300' : 'text-amber-300'}>
+          <span className={step === 2 ? 'text-emerald-800 font-medium' : 'text-amber-800 font-medium'}>
             {feedback}
           </span>
-          <span className="text-slate-200 tabular-nums shrink-0 ml-2">
+          <span className="text-slate-800 tabular-nums shrink-0 ml-2">
             {progressSec.toFixed(1)}s / {durationSec.toFixed(1)}s
           </span>
         </div>
-        <div className="w-full bg-slate-900 border border-slate-800 rounded-full h-2 overflow-hidden">
+        <div className="w-full bg-green-50 border border-green-200 rounded-full h-2 overflow-hidden">
           <div
-            className="bg-green-300 h-full rounded-full transition-all duration-75"
+            className="bg-emerald-600 h-full rounded-full transition-all duration-75"
             style={{ width: `${pct}%` }}
           />
         </div>

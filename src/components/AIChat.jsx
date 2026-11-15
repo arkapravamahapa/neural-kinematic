@@ -38,12 +38,12 @@ function AIChat() {
   };
 
   return (
-    <div className="bg-slate-900/80 backdrop-blur-md p-6 rounded-xl border border-slate-800 h-[34rem] flex flex-col">
-      <div className="border-b border-slate-800 pb-4 mb-4">
-        <h2 className="text-lg font-semibold text-slate-100 tracking-tight">
+    <div className="bg-green-50 p-6 rounded-xl border border-green-200 h-[34rem] flex flex-col">
+      <div className="border-b border-green-200 pb-4 mb-4">
+        <h2 className="text-lg font-semibold text-slate-900 tracking-tight">
           Biomechanical Consultation
         </h2>
-        <p className="text-xs text-slate-400 mt-0.5">Clinical Q&amp;A &amp; Protocol Guidance</p>
+        <p className="text-xs text-slate-600 mt-0.5">Clinical Q&amp;A &amp; Protocol Guidance</p>
       </div>
 
       <div className="flex-1 overflow-y-auto mb-4 space-y-3 pr-1">
@@ -55,8 +55,8 @@ function AIChat() {
             <div
               className={`max-w-[85%] px-3.5 py-2.5 rounded-lg text-sm leading-relaxed ${
                 msg.sender === 'user'
-                  ? 'bg-green-300 text-slate-950 font-medium'
-                  : 'bg-slate-950/90 text-slate-200 border border-slate-800'
+                  ? 'bg-green-300 text-slate-950 border border-green-400 font-medium'
+                  : 'bg-green-100/60 text-slate-800 border border-green-200'
               }`}
             >
               {msg.text}
@@ -65,7 +65,7 @@ function AIChat() {
         ))}
         {isSending && (
           <div className="flex justify-start">
-            <div className="px-3.5 py-2 rounded-lg text-xs font-mono text-slate-400 bg-slate-950/90 border border-slate-800">
+            <div className="px-3.5 py-2 rounded-lg text-xs font-mono text-slate-600 bg-green-100/60 border border-green-200">
               Analyzing clinical query...
             </div>
           </div>
@@ -79,12 +79,12 @@ function AIChat() {
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && sendMessage()}
           placeholder="Ask about symmetry, jerk RMS, or pinch ROM..."
-          className="flex-1 bg-slate-950 border border-slate-800 text-slate-100 placeholder:text-slate-500 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-300"
+          className="flex-1 bg-green-50 border border-green-300 text-slate-900 placeholder:text-slate-500 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-600"
         />
         <button
           onClick={sendMessage}
           disabled={isSending}
-          className="bg-green-300 hover:bg-green-200 disabled:opacity-50 text-slate-950 px-4 py-2 rounded-lg text-sm font-semibold transition-colors whitespace-nowrap shrink-0"
+          className="bg-green-300 hover:bg-green-200 disabled:opacity-50 text-slate-950 border border-green-400 px-4 py-2 rounded-lg text-sm font-semibold transition-colors whitespace-nowrap shrink-0"
         >
           Send
         </button>

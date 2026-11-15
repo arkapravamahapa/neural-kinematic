@@ -19,6 +19,11 @@ import {
   computeNormalizationProfile,
   normalizeLandmarks,
 } from './utils/calibration';
+import {
+  getDefaultSafetyLimits,
+  evaluateRomThreshold,
+  playThresholdAlertTone,
+} from './utils/thresholdMonitor';
 
 const CALIBRATION_DURATION_SEC = 3.0;
 
@@ -47,6 +52,8 @@ const DEFAULT_EXERCISES = {
     joint_labels: ['Hip (23)', 'Knee (25)', 'Ankle (27)'],
     rom_target_min: 70,
     rom_target_max: 170,
+    safety_min: 55,
+    safety_max: 176,
     guidance: {
       framing:
         'Stand 2–2.5 m from the camera at a slight 30° angle so hip, knee, and ankle stay visible.',
@@ -71,6 +78,8 @@ const DEFAULT_EXERCISES = {
     joint_labels: ['Shoulder (11)', 'Elbow (13)', 'Wrist (15)'],
     rom_target_min: 35,
     rom_target_max: 165,
+    safety_min: 25,
+    safety_max: 175,
     guidance: {
       framing:
         'Face the camera 1.5–2 m back with your upper torso, left shoulder, elbow, and wrist clearly framed.',
@@ -95,6 +104,8 @@ const DEFAULT_EXERCISES = {
     joint_labels: ['R.Shoulder (12)', 'L.Shoulder (11)', 'L.Elbow (13)'],
     rom_target_min: 95,
     rom_target_max: 175,
+    safety_min: 80,
+    safety_max: 178,
     guidance: {
       framing:
         'Stand straight facing the camera 1.5–2 m away so both shoulders and extended arms fit inside the frame.',
@@ -120,6 +131,8 @@ const DEFAULT_EXERCISES = {
     joint_labels: ['Thumb Tip (4)', 'Index Tip (8)', 'Index MCP (5)'],
     rom_target_min: 10,
     rom_target_max: 90,
+    safety_min: 5,
+    safety_max: 105,
     guidance: {
       framing:
         'Position one hand 35–55 cm in front of the camera with good lighting and an uncluttered background.',
@@ -204,6 +217,13 @@ function App() {
   const [calibrationState, setCalibrationState] = useState(() =>
     createInitialCalibrationState('pose')
   );
+  const [customSafetyLimits, setCustomSafetyLimits] = useState(null);
+  const [audioAlertEnabled, setAudioAlertEnabled] = useState(true);
+  const [breachStats, setBreachStats] = useState({
+    upperCount: 0,
+    lowerCount: 0,
+    lastEvent: '',
+  });
 
   const calibrationRef = useRef({
     status: 'calibrating',
@@ -216,17 +236,46 @@ function App() {
   });
 
   const activeExercise = exercises[selectedExerciseKey] || DEFAULT_EXERCISES.knee_flexion;
+  const safetyLimits = customSafetyLimits || getDefaultSafetyLimits(activeExercise);
+  const monitoredSignal =
+    (clinicalMetrics.tracker || activeExercise.tracker) === 'hands'
+      ? clinicalMetrics.pinch_aperture || 0
+      : clinicalMetrics.smoothed_angle || 0;
+  const thresholdStatus = evaluateRomThreshold(
+    monitoredSignal,
+    safetyLimits,
+    clinicalMetrics.status
+  );
+
   const activeExerciseRef = useRef(activeExercise);
   const selectedExerciseKeyRef = useRef(selectedExerciseKey);
   const isPausedRef = useRef(isPaused);
   const voiceEnabledRef = useRef(voiceEnabled);
   const targetRepsRef = useRef(targetReps);
   const targetGoalSpokenRef = useRef(false);
+  const safetyLimitsRef = useRef(safetyLimits);
+  const audioAlertEnabledRef = useRef(audioAlertEnabled);
+  const thresholdStatusRef = useRef(thresholdStatus);
+  const audioCtxRef = useRef(null);
+  const lastToneTimeRef = useRef(0);
+  const lastBreachStateRef = useRef('standby');
 
   useEffect(() => {
     activeExerciseRef.current = activeExercise;
     selectedExerciseKeyRef.current = selectedExerciseKey;
   }, [activeExercise, selectedExerciseKey]);
+
+  useEffect(() => {
+    safetyLimitsRef.current = safetyLimits;
+  }, [safetyLimits]);
+
+  useEffect(() => {
+    audioAlertEnabledRef.current = audioAlertEnabled;
+  }, [audioAlertEnabled]);
+
+  useEffect(() => {
+    thresholdStatusRef.current = thresholdStatus;
+  }, [thresholdStatus]);
 
   useEffect(() => {
     isPausedRef.current = isPaused;
@@ -365,6 +414,9 @@ function App() {
     setTelemetrySeries([]);
     setTelemetryCount(0);
     setSessionStartTime(Date.now());
+    setCustomSafetyLimits(null);
+    setBreachStats({ upperCount: 0, lowerCount: 0, lastEvent: '' });
+    lastBreachStateRef.current = 'standby';
     sessionLogRef.current = [];
     lastAlertSpoken.current = '';
     targetGoalSpokenRef.current = false;
@@ -388,6 +440,8 @@ function App() {
     setTelemetrySeries([]);
     setTelemetryCount(0);
     setSessionStartTime(Date.now());
+    setBreachStats({ upperCount: 0, lowerCount: 0, lastEvent: '' });
+    lastBreachStateRef.current = 'standby';
     sessionLogRef.current = [];
     lastAlertSpoken.current = '';
     targetGoalSpokenRef.current = false;
@@ -427,7 +481,7 @@ function App() {
     const rows = sessionLogRef.current;
     const t0 = rows.length > 0 ? rows[0].time : Date.now();
     const csvHeader =
-      'Timestamp_ISO,Elapsed_s,Patient_ID,Protocol_ID,Protocol_Name,Smoothed_Angle_deg,Pinch_Aperture_pct,Pinch_Distance_mm,Rep_Count,Jerk_RMS,DTW_Form_Match_pct,Compensation_Alerts\n';
+      'Timestamp_ISO,Elapsed_s,Patient_ID,Protocol_ID,Protocol_Name,Smoothed_Angle_deg,Pinch_Aperture_pct,Pinch_Distance_mm,Rep_Count,Jerk_RMS,DTW_Form_Match_pct,Threshold_State,Compensation_Alerts\n';
 
     const sourceRows =
       rows.length > 0
@@ -441,6 +495,7 @@ function App() {
               reps: clinicalMetrics.reps || 0,
               jerk: clinicalMetrics.jerk_score || 0,
               dtw: clinicalMetrics.dtw_consistency ?? 100,
+              thresholdState: thresholdStatus.state,
               alerts: (clinicalMetrics.alerts || []).join(' | '),
             },
           ];
@@ -459,6 +514,7 @@ function App() {
           row.reps,
           row.jerk,
           row.dtw,
+          row.thresholdState || 'nominal',
           row.alerts || '',
         ]
           .map(escapeCsvCell)
@@ -623,9 +679,11 @@ function App() {
               const thumbTip = landmarks[4];
               const indexTip = landmarks[8];
               if (thumbTip && indexTip) {
+                const pinchColor =
+                  thresholdStatusRef.current.severity === 'critical' ? '#FB7185' : '#F59E0B';
                 ctx.save();
-                ctx.strokeStyle = '#F59E0B';
-                ctx.lineWidth = 2;
+                ctx.strokeStyle = pinchColor;
+                ctx.lineWidth = 2.5;
                 ctx.setLineDash([5, 4]);
                 ctx.beginPath();
                 ctx.moveTo(thumbTip.x * canvas.width, thumbTip.y * canvas.height);
@@ -683,9 +741,15 @@ function App() {
                 landmarks[joints[1]] &&
                 landmarks[joints[2]]
               ) {
+                const activeJointColor =
+                  thresholdStatusRef.current.severity === 'critical'
+                    ? '#FB7185'
+                    : thresholdStatusRef.current.severity === 'warning'
+                    ? '#FBBF24'
+                    : '#86EFAC';
                 ctx.save();
-                ctx.strokeStyle = '#86EFAC';
-                ctx.lineWidth = 4;
+                ctx.strokeStyle = activeJointColor;
+                ctx.lineWidth = thresholdStatusRef.current.severity === 'critical' ? 5 : 4;
                 ctx.beginPath();
                 ctx.moveTo(
                   landmarks[joints[0]].x * canvas.width,
@@ -768,9 +832,21 @@ function App() {
           if (data.type === 'clinical_telemetry' && data.metrics) {
             setClinicalMetrics(data.metrics);
 
+            const activeLimits = safetyLimitsRef.current;
+            const sigVal =
+              (data.metrics.tracker || activeExerciseRef.current.tracker) === 'hands'
+                ? data.metrics.pinch_aperture || 0
+                : data.metrics.smoothed_angle || 0;
+            const evalThreshold = evaluateRomThreshold(
+              sigVal,
+              activeLimits,
+              data.metrics.status
+            );
+
             if (data.metrics.status === 'tracking') {
+              const nowMs = Date.now();
               const point = {
-                time: Date.now(),
+                time: nowMs,
                 protocol: selectedExerciseKeyRef.current,
                 angle: data.metrics.smoothed_angle,
                 pinchAperture: data.metrics.pinch_aperture || 0,
@@ -778,6 +854,7 @@ function App() {
                 reps: data.metrics.reps,
                 jerk: data.metrics.jerk_score,
                 dtw: data.metrics.dtw_consistency,
+                thresholdState: evalThreshold.state,
                 alerts: (data.metrics.alerts || []).join(' | '),
               };
               sessionLogRef.current.push(point);
@@ -786,6 +863,35 @@ function App() {
                 const next = [...prev, point];
                 return next.length > 100 ? next.slice(-100) : next;
               });
+
+              if (evalThreshold.severity === 'critical') {
+                if (lastBreachStateRef.current !== evalThreshold.state) {
+                  const timeLabel = new Date(nowMs).toLocaleTimeString([], {
+                    hour12: false,
+                  });
+                  setBreachStats((prev) => ({
+                    upperCount:
+                      prev.upperCount + (evalThreshold.state === 'exceeded_max' ? 1 : 0),
+                    lowerCount:
+                      prev.lowerCount + (evalThreshold.state === 'below_min' ? 1 : 0),
+                    lastEvent: `${evalThreshold.label} (${evalThreshold.value}${activeLimits.unit} @ ${timeLabel})`,
+                  }));
+                  speakFeedback(
+                    evalThreshold.state === 'exceeded_max'
+                      ? 'Caution. Range of motion exceeded maximum safety limit.'
+                      : 'Caution. Range of motion fell below minimum safety limit.'
+                  );
+                }
+
+                if (
+                  audioAlertEnabledRef.current &&
+                  nowMs - lastToneTimeRef.current >= 1200
+                ) {
+                  playThresholdAlertTone(evalThreshold.state, audioCtxRef);
+                  lastToneTimeRef.current = nowMs;
+                }
+              }
+              lastBreachStateRef.current = evalThreshold.state;
             }
 
             if (
@@ -849,11 +955,11 @@ function App() {
   }, [detectMovement, ensureTrackerLoaded]);
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 font-sans flex flex-col">
+    <div className="min-h-screen bg-green-100 text-slate-900 font-sans flex flex-col">
       {/* 3-Zone Top Navigation Contract */}
-      <header className="bg-slate-950/90 backdrop-blur-md border-b border-slate-800/80 px-6 py-3.5 sticky top-0 z-30">
+      <header className="bg-green-50/95 backdrop-blur-md border-b border-green-200 px-6 py-3.5 sticky top-0 z-30">
         <div className="max-w-7xl mx-auto flex items-center justify-between gap-8">
-          <span className="text-lg font-bold tracking-tight text-slate-50 whitespace-nowrap shrink-0">
+          <span className="text-lg font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0">
             Neural-Kinematic
           </span>
 
@@ -862,8 +968,8 @@ function App() {
               onClick={() => setCurrentView('patient')}
               className={`py-1 text-sm font-medium transition-colors whitespace-nowrap shrink-0 border-b-2 ${
                 currentView === 'patient'
-                  ? 'border-green-300 text-slate-50'
-                  : 'border-transparent text-slate-400 hover:text-slate-200'
+                  ? 'border-emerald-600 text-slate-950'
+                  : 'border-transparent text-slate-600 hover:text-slate-950'
               }`}
             >
               Patient Capture
@@ -872,8 +978,8 @@ function App() {
               onClick={() => setCurrentView('doctor')}
               className={`py-1 text-sm font-medium transition-colors whitespace-nowrap shrink-0 border-b-2 ${
                 currentView === 'doctor'
-                  ? 'border-green-300 text-slate-50'
-                  : 'border-transparent text-slate-400 hover:text-slate-200'
+                  ? 'border-emerald-600 text-slate-950'
+                  : 'border-transparent text-slate-600 hover:text-slate-950'
               }`}
             >
               Clinical Dashboard
@@ -883,7 +989,7 @@ function App() {
           <div className="flex items-center gap-3 shrink-0">
             <button
               onClick={saveAndResetSession}
-              className="bg-green-300 hover:bg-green-200 text-slate-950 px-4 py-2 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-green-300"
+              className="bg-green-300 hover:bg-green-200 text-slate-950 border border-green-400 px-4 py-2 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600"
             >
               Save Session
             </button>
@@ -892,17 +998,17 @@ function App() {
       </header>
 
       {/* Protocol & Patient Command Bar */}
-      <div className="bg-slate-900/60 border-b border-slate-800/80 px-6 py-3">
+      <div className="bg-green-50/80 border-b border-green-200 px-6 py-3">
         <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-4">
           <div className="flex flex-wrap items-center gap-3">
-            <label htmlFor="exercise-protocol" className="text-xs font-medium text-slate-400 whitespace-nowrap">
+            <label htmlFor="exercise-protocol" className="text-xs font-medium text-slate-700 whitespace-nowrap">
               Protocol
             </label>
             <select
               id="exercise-protocol"
               value={selectedExerciseKey}
               onChange={(e) => handleExerciseChange(e.target.value)}
-              className="bg-slate-950 border border-slate-700 hover:border-green-300/60 text-slate-100 text-sm font-medium rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-green-300 transition-colors"
+              className="bg-green-50 border border-green-300 hover:border-emerald-600 text-slate-900 text-sm font-medium rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-emerald-600 transition-colors"
             >
               {Object.entries(exercises).map(([key, ex]) => (
                 <option key={key} value={key}>
@@ -911,14 +1017,14 @@ function App() {
               ))}
             </select>
 
-            <label htmlFor="patient-select" className="text-xs font-medium text-slate-400 whitespace-nowrap ml-1">
+            <label htmlFor="patient-select" className="text-xs font-medium text-slate-700 whitespace-nowrap ml-1">
               Patient
             </label>
             <select
               id="patient-select"
               value={patientId}
               onChange={(e) => setPatientId(e.target.value)}
-              className="bg-slate-950 border border-slate-700 hover:border-green-300/60 text-slate-100 text-xs font-mono rounded-lg px-2.5 py-2 focus:outline-none focus:ring-2 focus:ring-green-300 transition-colors"
+              className="bg-green-50 border border-green-300 hover:border-emerald-600 text-slate-900 text-xs font-mono rounded-lg px-2.5 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-600 transition-colors"
             >
               {PATIENT_PROFILES.map((p) => (
                 <option key={p.id} value={p.id}>
@@ -927,8 +1033,8 @@ function App() {
               ))}
             </select>
 
-            <div className="hidden xl:flex items-center gap-2 text-xs text-slate-400 font-mono ml-1">
-              <span className="text-green-300">
+            <div className="hidden xl:flex items-center gap-2 text-xs text-slate-600 font-mono ml-1">
+              <span className="text-emerald-800 font-medium">
                 {activeExercise.tracker === 'hands' ? 'MediaPipe Hands' : 'MediaPipe Pose'}
               </span>
               <span aria-hidden="true">·</span>
@@ -937,11 +1043,11 @@ function App() {
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5 text-xs font-mono">
-            <span className={wsConnected ? 'text-green-300' : 'text-amber-300'}>
+            <span className={wsConnected ? 'text-emerald-800 font-medium' : 'text-amber-700 font-medium'}>
               {wsConnected ? '● Linked' : '○ Connecting'}
             </span>
-            <span className="text-slate-600" aria-hidden="true">·</span>
-            <span className={modelReady ? 'text-emerald-400' : 'text-slate-400'}>
+            <span className="text-green-300" aria-hidden="true">·</span>
+            <span className={modelReady ? 'text-green-800 font-medium' : 'text-slate-600'}>
               {modelReady ? 'Vision Ready' : 'Loading...'}
             </span>
 
@@ -950,8 +1056,8 @@ function App() {
               onClick={() => setIsPaused((p) => !p)}
               className={`px-3 py-1.5 rounded-md border transition-colors whitespace-nowrap shrink-0 ${
                 isPaused
-                  ? 'bg-amber-500/15 border-amber-400/50 text-amber-300'
-                  : 'bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700'
+                  ? 'bg-amber-50 border-amber-300 text-amber-800'
+                  : 'bg-green-50 border-green-300 text-slate-800 hover:border-emerald-500'
               }`}
             >
               {isPaused ? 'Resume' : 'Pause'}
@@ -962,8 +1068,8 @@ function App() {
               onClick={() => setVoiceEnabled((v) => !v)}
               className={`px-3 py-1.5 rounded-md border transition-colors whitespace-nowrap shrink-0 ${
                 voiceEnabled
-                  ? 'bg-slate-950 border-slate-800 text-green-300 hover:border-slate-700'
-                  : 'bg-slate-950 border-slate-800 text-slate-500 hover:text-slate-300'
+                  ? 'bg-green-200/70 border-emerald-400 text-emerald-900 hover:bg-green-200'
+                  : 'bg-green-50 border-green-300 text-slate-600 hover:text-slate-900'
               }`}
             >
               {voiceEnabled ? 'Voice On' : 'Voice Muted'}
@@ -972,7 +1078,7 @@ function App() {
             <button
               type="button"
               onClick={resetCurrentTelemetry}
-              className="text-slate-400 hover:text-slate-100 border border-slate-800 hover:border-slate-700 px-3 py-1.5 rounded-md transition-colors whitespace-nowrap shrink-0"
+              className="bg-green-50 text-slate-700 hover:text-slate-950 border border-green-300 hover:border-emerald-500 px-3 py-1.5 rounded-md transition-colors whitespace-nowrap shrink-0"
             >
               Reset
             </button>
@@ -989,17 +1095,17 @@ function App() {
           }
         >
           <div className="lg:col-span-6 flex flex-col gap-6">
-            <div className="bg-slate-900/80 backdrop-blur-md p-5 rounded-xl border border-slate-800 flex flex-col">
+            <div className="bg-green-50 p-5 rounded-xl border border-green-200 flex flex-col">
               <div className="flex justify-between items-center mb-4">
                 <div>
-                  <h2 className="text-base font-semibold text-slate-100 tracking-tight">
+                  <h2 className="text-base font-semibold text-slate-900 tracking-tight">
                     Optical Sensor Viewport
                   </h2>
-                  <p className="text-xs text-slate-400 mt-0.5">
+                  <p className="text-xs text-slate-600 mt-0.5">
                     {activeExercise.category || 'Biomechanical Tracking'}
                   </p>
                 </div>
-                <span className="text-xs font-mono text-green-300">
+                <span className="text-xs font-mono text-emerald-800 font-medium">
                   {isPaused
                     ? 'Paused'
                     : calibrationState.status !== 'calibrated'
@@ -1017,7 +1123,15 @@ function App() {
                 onRecalibrate={handleRecalibrate}
               />
 
-              <div className="relative bg-slate-950 aspect-video rounded-lg overflow-hidden flex items-center justify-center border border-slate-800">
+              <div
+                className={`relative bg-slate-900 aspect-video rounded-lg overflow-hidden flex items-center justify-center border transition-colors duration-150 ${
+                  thresholdStatus.severity === 'critical'
+                    ? 'border-rose-500 ring-2 ring-rose-500/50'
+                    : thresholdStatus.severity === 'warning'
+                    ? 'border-amber-500'
+                    : 'border-green-300'
+                }`}
+              >
                 <Webcam
                   ref={webcamRef}
                   className="absolute w-full h-full object-cover transform scale-x-[-1]"
@@ -1026,7 +1140,23 @@ function App() {
                   ref={canvasRef}
                   className="absolute w-full h-full object-cover z-10 transform scale-x-[-1]"
                 />
-                <div className="absolute bottom-3 left-3 z-20 bg-slate-950/75 backdrop-blur-sm border border-slate-800 px-3 py-1.5 rounded-md text-xs font-mono text-slate-200 pointer-events-none">
+                {calibrationState.status === 'calibrated' &&
+                  (thresholdStatus.severity === 'critical' ||
+                    thresholdStatus.severity === 'warning') && (
+                    <div
+                      className={`absolute top-3 left-3 right-3 z-20 px-3 py-2 rounded-md border text-xs font-mono flex items-center justify-between gap-2 backdrop-blur-sm pointer-events-none ${
+                        thresholdStatus.severity === 'critical'
+                          ? 'bg-rose-50/95 border-rose-400 text-rose-900'
+                          : 'bg-amber-50/95 border-amber-400 text-amber-900'
+                      }`}
+                    >
+                      <span className="font-semibold">{thresholdStatus.label}</span>
+                      <span className="tabular-nums">
+                        {thresholdStatus.value.toFixed(1)}{safetyLimits.unit} (Limit {safetyLimits.min}–{safetyLimits.max}{safetyLimits.unit})
+                      </span>
+                    </div>
+                  )}
+                <div className="absolute bottom-3 left-3 z-20 bg-green-50/95 backdrop-blur-sm border border-green-300 px-3 py-1.5 rounded-md text-xs font-mono text-slate-900 pointer-events-none">
                   {calibrationState.status !== 'calibrated'
                     ? activeExercise.tracker === 'hands'
                       ? `Calibrating Open Palm · ${calibrationState.progressSec.toFixed(1)}s / ${calibrationState.durationSec.toFixed(1)}s`
@@ -1037,7 +1167,7 @@ function App() {
                 </div>
               </div>
 
-              <p className="mt-3 text-xs text-slate-400 text-center">
+              <p className="mt-3 text-xs text-slate-600 text-center">
                 {calibrationState.status !== 'calibrated'
                   ? activeExercise.tracker === 'hands'
                     ? 'Hold your open palm steady for 3 seconds to normalize hand coordinates.'
@@ -1065,6 +1195,14 @@ function App() {
               onClinicalNotesChange={setClinicalNotes}
               onExportCSV={exportSessionCSV}
               onReset={saveAndResetSession}
+              safetyLimits={safetyLimits}
+              thresholdStatus={thresholdStatus}
+              breachStats={breachStats}
+              audioAlertEnabled={audioAlertEnabled}
+              onToggleAudioAlert={() => setAudioAlertEnabled((prev) => !prev)}
+              onUpdateSafetyLimits={setCustomSafetyLimits}
+              onResetSafetyLimits={() => setCustomSafetyLimits(null)}
+              onTestAlertTone={() => playThresholdAlertTone('exceeded_max', audioCtxRef)}
             />
             <SessionHistory patientId={patientId} refreshTrigger={historyTrigger} />
           </div>

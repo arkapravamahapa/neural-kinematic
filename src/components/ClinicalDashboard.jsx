@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { jsPDF } from 'jspdf';
 import KinematicStreamChart from './KinematicStreamChart';
+import ThresholdMonitor from './ThresholdMonitor';
 
 function ClinicalDashboard({
   metrics,
@@ -15,24 +16,32 @@ function ClinicalDashboard({
   onClinicalNotesChange,
   onExportCSV,
   onReset,
+  safetyLimits,
+  thresholdStatus,
+  breachStats,
+  audioAlertEnabled,
+  onToggleAudioAlert,
+  onUpdateSafetyLimits,
+  onResetSafetyLimits,
+  onTestAlertTone,
 }) {
   const [exportStatus, setExportStatus] = useState('');
 
   const isHands = (metrics.tracker || exercise?.tracker) === 'hands';
 
   let smoothnessLabel = 'Calibrating';
-  let smoothnessColor = 'text-slate-400';
+  let smoothnessColor = 'text-slate-500';
 
   if (metrics.status === 'tracking') {
     if (metrics.jerk_score < 15) {
       smoothnessLabel = 'Highly Stable';
-      smoothnessColor = 'text-green-300';
+      smoothnessColor = 'text-emerald-700';
     } else if (metrics.jerk_score < 40) {
       smoothnessLabel = 'Moderate Tremor';
-      smoothnessColor = 'text-amber-300';
+      smoothnessColor = 'text-amber-700';
     } else {
       smoothnessLabel = 'Unstable / Erratic';
-      smoothnessColor = 'text-rose-400';
+      smoothnessColor = 'text-rose-700';
     }
   }
 
@@ -69,17 +78,15 @@ function ClinicalDashboard({
       elapsedSec % 60
     ).padStart(2, '0')}`;
 
-    // Header
-    doc.setFillColor(15, 23, 42);
+    doc.setFillColor(248, 250, 252);
     doc.rect(0, 0, 210, 32, 'F');
-    doc.setTextColor(134, 239, 172);
+    doc.setTextColor(4, 120, 87);
     doc.setFontSize(16);
     doc.text('Neural-Kinematic Clinical Assessment', 14, 15);
-    doc.setTextColor(203, 213, 225);
+    doc.setTextColor(71, 85, 105);
     doc.setFontSize(9);
     doc.text(`Generated: ${nowStr}   |   Patient ID: ${patientId || 'PT-1042'}`, 14, 23);
 
-    // Protocol & Summary
     doc.setTextColor(15, 23, 42);
     doc.setFontSize(12);
     doc.text(`Protocol: ${exercise?.name || 'Knee Flexion (Squats)'}`, 14, 44);
@@ -92,7 +99,6 @@ function ClinicalDashboard({
       57
     );
 
-    // Key metrics grid
     doc.setDrawColor(203, 213, 225);
     doc.line(14, 63, 196, 63);
     doc.setTextColor(15, 23, 42);
@@ -123,25 +129,30 @@ function ClinicalDashboard({
       );
     }
 
-    // Compensation alerts
     const alertsText =
       metrics.alerts && metrics.alerts.length > 0
         ? metrics.alerts.join(', ')
         : 'None detected during session';
     doc.text(`Posture Compensations: ${alertsText}`, 14, 96);
+    if (safetyLimits) {
+      doc.text(
+        `Safety Bounds (${safetyLimits.min}-${safetyLimits.max}${safetyLimits.unit}): Upper Breaches ${breachStats?.upperCount || 0} | Lower Breaches ${breachStats?.lowerCount || 0}`,
+        14,
+        103
+      );
+    }
 
-    // Vector Waveform Sparkline
     doc.setFontSize(10);
     doc.setTextColor(51, 65, 85);
     doc.text(
       isHands ? 'Live Pinch Aperture Trajectory (%)' : 'Live Joint Angle Trajectory (deg)',
       14,
-      110
+      113
     );
     const boxX = 14;
-    const boxY = 114;
+    const boxY = 117;
     const boxW = 182;
-    const boxH = 52;
+    const boxH = 50;
     doc.setFillColor(248, 250, 252);
     doc.rect(boxX, boxY, boxW, boxH, 'FD');
 
@@ -164,20 +175,19 @@ function ClinicalDashboard({
     } else {
       doc.setFontSize(9);
       doc.setTextColor(100, 116, 139);
-      doc.text('Insufficient live stream samples for trajectory plot.', 20, 140);
+      doc.text('Insufficient live stream samples for trajectory plot.', 20, 142);
     }
 
-    // Clinician Notes
     doc.setTextColor(15, 23, 42);
     doc.setFontSize(11);
-    doc.text('Clinician Notes:', 14, 180);
+    doc.text('Clinician Notes:', 14, 181);
     doc.setFontSize(10);
     doc.setTextColor(71, 85, 105);
     const wrappedNotes = doc.splitTextToSize(
       clinicalNotes?.trim() || 'No additional clinician observations recorded.',
       180
     );
-    doc.text(wrappedNotes, 14, 187);
+    doc.text(wrappedNotes, 14, 188);
 
     doc.save(`clinical_report_${exercise?.key || 'session'}_${patientId || 'PT-1042'}_${Date.now()}.pdf`);
     setExportStatus('Clinical PDF report downloaded');
@@ -185,19 +195,19 @@ function ClinicalDashboard({
   };
 
   return (
-    <div className="bg-slate-900/80 backdrop-blur-md p-6 rounded-xl border border-slate-800">
-      <div className="flex flex-wrap justify-between items-center gap-3 mb-5 border-b border-slate-800 pb-4">
+    <div className="bg-green-50 p-6 rounded-xl border border-green-200">
+      <div className="flex flex-wrap justify-between items-center gap-3 mb-5 border-b border-green-200 pb-4">
         <div>
-          <h3 className="text-lg font-semibold text-slate-100 tracking-tight">
+          <h3 className="text-lg font-semibold text-slate-900 tracking-tight">
             Biomechanical Telemetry
           </h3>
-          <p className="text-xs text-slate-400 mt-0.5 font-mono tabular-nums">
+          <p className="text-xs text-slate-600 mt-0.5 font-mono tabular-nums">
             <span>{exercise?.name || 'Knee Flexion (Squats)'}</span>
-            <span className="mx-1.5 text-slate-600" aria-hidden="true">·</span>
-            <span className="text-green-300">
+            <span className="mx-1.5 text-green-300" aria-hidden="true">·</span>
+            <span className="text-emerald-800 font-medium">
               {metrics.status === 'tracking' ? '● Active' : '○ Buffering'}
             </span>
-            <span className="mx-1.5 text-slate-600" aria-hidden="true">·</span>
+            <span className="mx-1.5 text-green-300" aria-hidden="true">·</span>
             <span>{telemetryCount || telemetrySeries.length} frames</span>
           </p>
         </div>
@@ -205,19 +215,19 @@ function ClinicalDashboard({
         <div className="flex flex-wrap items-center gap-2">
           <button
             onClick={handleExportCSVClick}
-            className="bg-slate-950 hover:bg-slate-800 text-green-300 border border-green-300/40 px-3 py-2 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-green-300"
+            className="bg-green-100/70 hover:bg-green-200/70 text-emerald-900 border border-green-300 px-3 py-2 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600"
           >
             Export CSV
           </button>
           <button
             onClick={handleExportPDFClick}
-            className="bg-slate-950 hover:bg-slate-800 text-slate-200 border border-slate-700 px-3 py-2 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-green-300"
+            className="bg-green-50 hover:bg-green-100 text-slate-800 border border-green-300 px-3 py-2 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600"
           >
             Export PDF
           </button>
           <button
             onClick={onReset}
-            className="bg-green-300 hover:bg-green-200 text-slate-950 px-3.5 py-2 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-green-300"
+            className="bg-green-300 hover:bg-green-200 text-slate-950 border border-green-400 px-3.5 py-2 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600"
           >
             Save &amp; Clear
           </button>
@@ -225,19 +235,19 @@ function ClinicalDashboard({
       </div>
 
       {exportStatus && (
-        <div className="mb-4 bg-green-300/10 border border-green-300/30 text-green-300 px-3.5 py-2 rounded-lg text-xs font-mono">
+        <div className="mb-4 bg-green-200/60 border border-green-300 text-emerald-900 px-3.5 py-2 rounded-lg text-xs font-mono">
           {exportStatus}
         </div>
       )}
 
       {metrics.alerts && metrics.alerts.length > 0 && (
-        <div className="mb-5 bg-amber-500/10 border border-amber-500/40 px-4 py-3 rounded-lg flex items-start gap-3">
-          <svg className="h-5 w-5 text-amber-300 shrink-0 mt-0.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+        <div className="mb-5 bg-amber-50 border border-amber-300 px-4 py-3 rounded-lg flex items-start gap-3">
+          <svg className="h-5 w-5 text-amber-600 shrink-0 mt-0.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
             <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
           </svg>
           <div>
-            <p className="text-xs font-semibold text-amber-300">Posture Compensation Detected</p>
-            <p className="text-xs text-amber-200/90 mt-1 font-mono">
+            <p className="text-xs font-semibold text-amber-900">Posture Compensation Detected</p>
+            <p className="text-xs text-amber-800 mt-1 font-mono">
               {metrics.alerts.join(' · ')}
             </p>
           </div>
@@ -245,20 +255,20 @@ function ClinicalDashboard({
       )}
 
       <div className="grid grid-cols-3 gap-4 mb-5">
-        <div className="bg-slate-950/70 p-4 rounded-lg border border-slate-800">
-          <p className="text-xs font-medium text-slate-400 mb-1">Repetitions</p>
-          <p className="text-3xl font-bold font-mono tabular-nums text-slate-50">
+        <div className="bg-green-100/55 p-4 rounded-lg border border-green-200">
+          <p className="text-xs font-medium text-slate-600 mb-1">Repetitions</p>
+          <p className="text-3xl font-bold font-mono tabular-nums text-slate-900">
             {metrics.reps || 0}
-            <span className="text-sm font-normal text-slate-500 ml-1">/ {targetReps}</span>
+            <span className="text-sm font-normal text-slate-600 ml-1">/ {targetReps}</span>
           </p>
-          <span className="text-xs text-green-300 font-mono mt-1 block">
+          <span className="text-xs text-emerald-800 font-mono mt-1 block">
             {isHands ? 'Pinch Cycles' : 'Verified Reps'}
           </span>
         </div>
 
-        <div className="bg-slate-950/70 p-4 rounded-lg border border-slate-800">
-          <p className="text-xs font-medium text-slate-400 mb-1">Jerk (RMS)</p>
-          <p className="text-3xl font-bold font-mono tabular-nums text-slate-50">
+        <div className="bg-green-100/55 p-4 rounded-lg border border-green-200">
+          <p className="text-xs font-medium text-slate-600 mb-1">Jerk (RMS)</p>
+          <p className="text-3xl font-bold font-mono tabular-nums text-slate-900">
             {(metrics.jerk_score || 0).toFixed(1)}
           </p>
           <span className={`text-xs font-medium mt-1 block ${smoothnessColor}`}>
@@ -266,21 +276,21 @@ function ClinicalDashboard({
           </span>
         </div>
 
-        <div className={`p-4 rounded-lg border ${isInconsistent ? 'bg-rose-950/30 border-rose-500/40' : 'bg-slate-950/70 border-slate-800'}`}>
-          <p className="text-xs font-medium text-slate-400 mb-1">DTW Form Match</p>
-          <p className={`text-3xl font-bold font-mono tabular-nums ${isInconsistent ? 'text-rose-300' : 'text-slate-50'}`}>
-            {dtwScore.toFixed(1)}<span className="text-sm text-slate-400 ml-0.5">%</span>
+        <div className={`p-4 rounded-lg border ${isInconsistent ? 'bg-rose-50 border-rose-300' : 'bg-green-100/55 border-green-200'}`}>
+          <p className="text-xs font-medium text-slate-600 mb-1">DTW Form Match</p>
+          <p className={`text-3xl font-bold font-mono tabular-nums ${isInconsistent ? 'text-rose-700' : 'text-slate-900'}`}>
+            {dtwScore.toFixed(1)}<span className="text-sm text-slate-600 ml-0.5">%</span>
           </p>
-          <span className={`text-xs font-medium mt-1 block ${isInconsistent ? 'text-rose-400' : 'text-green-300'}`}>
+          <span className={`text-xs font-medium mt-1 block ${isInconsistent ? 'text-rose-700' : 'text-emerald-800'}`}>
             {isInconsistent ? 'Form Degrading' : 'Consistent'}
           </span>
         </div>
       </div>
 
       {/* Repetition Target Progress & Goal Control */}
-      <div className="mb-5 bg-slate-950/60 border border-slate-800 rounded-lg px-4 py-3">
+      <div className="mb-5 bg-green-100/55 border border-green-200 rounded-lg px-4 py-3">
         <div className="flex items-center justify-between text-xs mb-2">
-          <span className="text-slate-300 font-medium">
+          <span className="text-slate-800 font-medium">
             Set Target Goal ({repGoalPercent}% complete)
           </span>
           <div className="flex items-center gap-1.5 font-mono">
@@ -291,8 +301,8 @@ function ClinicalDashboard({
                 onClick={() => onTargetRepsChange?.(goal)}
                 className={`px-2 py-0.5 rounded text-xs transition-colors ${
                   targetReps === goal
-                    ? 'bg-green-300 text-slate-950 font-semibold'
-                    : 'bg-slate-900 text-slate-400 hover:text-slate-200 border border-slate-800'
+                    ? 'bg-green-300 text-slate-950 border border-green-400 font-semibold'
+                    : 'bg-green-50 text-slate-700 hover:text-slate-950 border border-green-200'
                 }`}
               >
                 {goal}
@@ -300,29 +310,44 @@ function ClinicalDashboard({
             ))}
           </div>
         </div>
-        <div className="w-full bg-slate-900 rounded-full h-1.5 overflow-hidden">
+        <div className="w-full bg-green-50 border border-green-200 rounded-full h-1.5 overflow-hidden">
           <div
-            className="bg-green-300 h-full rounded-full transition-all duration-150"
+            className="bg-emerald-600 h-full rounded-full transition-all duration-150"
             style={{ width: `${repGoalPercent}%` }}
           />
         </div>
       </div>
 
+      {/* ROM Safety Threshold Monitoring Panel */}
+      {safetyLimits && (
+        <ThresholdMonitor
+          exercise={exercise}
+          safetyLimits={safetyLimits}
+          thresholdStatus={thresholdStatus}
+          breachStats={breachStats}
+          audioAlertEnabled={audioAlertEnabled}
+          onToggleAudioAlert={onToggleAudioAlert}
+          onUpdateSafetyLimits={onUpdateSafetyLimits}
+          onResetSafetyLimits={onResetSafetyLimits}
+          onTestAlertTone={onTestAlertTone}
+        />
+      )}
+
       {/* Real-time Recharts Kinematic Stream Plot */}
       <div className="mb-5">
         <div className="flex items-center justify-between text-xs mb-2">
-          <span className="font-medium text-slate-300">
+          <span className="font-medium text-slate-800">
             {isHands ? 'Live Pinch Aperture & MCP Stream' : 'Live Joint Angle Stream'}
           </span>
-          <span className="font-mono tabular-nums text-slate-400">
+          <span className="font-mono tabular-nums text-slate-600">
             {isHands ? (
               <>
-                <span className="text-green-300">Pinch {(metrics.pinch_distance_mm || 0).toFixed(1)} mm</span>
-                <span className="mx-1.5 text-slate-600">·</span>
-                <span className="text-amber-300">MCP {(metrics.smoothed_angle || 0).toFixed(1)}°</span>
+                <span className="text-emerald-800 font-medium">Pinch {(metrics.pinch_distance_mm || 0).toFixed(1)} mm</span>
+                <span className="mx-1.5 text-green-300">·</span>
+                <span className="text-amber-700 font-medium">MCP {(metrics.smoothed_angle || 0).toFixed(1)}°</span>
               </>
             ) : (
-              <span className="text-green-300">Savitzky-Golay {(metrics.smoothed_angle || 0).toFixed(1)}°</span>
+              <span className="text-emerald-800 font-medium">Savitzky-Golay {(metrics.smoothed_angle || 0).toFixed(1)}°</span>
             )}
           </span>
         </div>
@@ -330,6 +355,7 @@ function ClinicalDashboard({
           telemetrySeries={telemetrySeries}
           exercise={exercise}
           isHands={isHands}
+          safetyLimits={safetyLimits}
         />
       </div>
 
@@ -337,40 +363,40 @@ function ClinicalDashboard({
       <div className="space-y-3">
         <div>
           <div className="flex justify-between text-xs mb-1.5">
-            <span className="font-medium text-slate-300">
+            <span className="font-medium text-slate-800">
               {isHands ? 'Thumb–Index Pinch Aperture' : 'Smoothed Articulation Angle'}
             </span>
-            <span className="font-mono tabular-nums font-semibold text-green-300">
+            <span className="font-mono tabular-nums font-semibold text-emerald-800">
               {isHands
                 ? `${(metrics.pinch_aperture || 0).toFixed(1)}% (${(metrics.pinch_distance_mm || 0).toFixed(1)} mm)`
                 : `${(metrics.smoothed_angle || 0).toFixed(1)}°`}
             </span>
           </div>
-          <div className="w-full bg-slate-950 border border-slate-800 rounded-full h-2 overflow-hidden">
+          <div className="w-full bg-green-100 border border-green-200 rounded-full h-2 overflow-hidden">
             <div
-              className="bg-gradient-to-r from-emerald-500 to-green-300 h-full rounded-full transition-all duration-75"
+              className="bg-gradient-to-r from-emerald-600 to-green-400 h-full rounded-full transition-all duration-75"
               style={{ width: `${primaryPercent}%` }}
             />
           </div>
         </div>
 
-        <div className="flex flex-wrap justify-between gap-2 text-xs pt-3 border-t border-slate-800 font-mono tabular-nums">
+        <div className="flex flex-wrap justify-between gap-2 text-xs pt-3 border-t border-green-200 font-mono tabular-nums">
           {isHands ? (
             <>
-              <span className="text-slate-400">
-                Min Pinch Span: <span className="font-semibold text-green-300">{(metrics.pinch_min_mm || 0).toFixed(1)} mm</span>
+              <span className="text-slate-700">
+                Min Pinch Span: <span className="font-semibold text-emerald-800">{(metrics.pinch_min_mm || 0).toFixed(1)} mm</span>
               </span>
-              <span className="text-slate-400">
-                MCP ROM Range: <span className="font-semibold text-slate-200">{(metrics.rom_min || 0).toFixed(1)}° – {(metrics.rom_max || 0).toFixed(1)}°</span>
+              <span className="text-slate-700">
+                MCP ROM Range: <span className="font-semibold text-slate-900">{(metrics.rom_min || 0).toFixed(1)}° – {(metrics.rom_max || 0).toFixed(1)}°</span>
               </span>
             </>
           ) : (
             <>
-              <span className="text-slate-400">
-                Max Extension: <span className="font-semibold text-green-300">{(metrics.rom_max || 0).toFixed(1)}°</span>
+              <span className="text-slate-700">
+                Max Extension: <span className="font-semibold text-emerald-800">{(metrics.rom_max || 0).toFixed(1)}°</span>
               </span>
-              <span className="text-slate-400">
-                Max Flexion: <span className="font-semibold text-emerald-400">{(metrics.rom_min || 0).toFixed(1)}°</span>
+              <span className="text-slate-700">
+                Max Flexion: <span className="font-semibold text-green-800">{(metrics.rom_min || 0).toFixed(1)}°</span>
               </span>
             </>
           )}
@@ -378,7 +404,7 @@ function ClinicalDashboard({
 
         {/* Clinician Session Notes */}
         <div className="pt-2">
-          <label htmlFor="clinical-notes" className="block text-xs font-medium text-slate-400 mb-1.5">
+          <label htmlFor="clinical-notes" className="block text-xs font-medium text-slate-700 mb-1.5">
             Clinician Observations (Included in PDF &amp; Saved Record)
           </label>
           <input
@@ -387,7 +413,7 @@ function ClinicalDashboard({
             value={clinicalNotes || ''}
             onChange={(e) => onClinicalNotesChange?.(e.target.value)}
             placeholder="e.g., Mild pain reported at 90 deg knee flexion; steady cadence..."
-            className="w-full bg-slate-950 border border-slate-800 text-slate-100 placeholder:text-slate-600 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-green-300"
+            className="w-full bg-green-50 border border-green-300 text-slate-900 placeholder:text-slate-500 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-emerald-600"
           />
         </div>
       </div>

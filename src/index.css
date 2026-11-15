@@ -4,10 +4,10 @@
 
 @layer base {
   html {
-    color-scheme: dark;
+    color-scheme: light;
   }
 
   body {
-    @apply bg-slate-950 text-slate-100 font-sans;
+    @apply bg-green-100 text-slate-900 font-sans;
   }
 }
