@@ -35,7 +35,10 @@ function CustomTooltip({ active, payload, isHands }) {
           Joint Angle: <span className="font-semibold">{(pt.angle ?? 0).toFixed(1)}°</span>
         </p>
       )}
-      {pt.thresholdState && pt.thresholdState !== 'nominal' && pt.thresholdState !== 'standby' && (
+      {pt.thresholdState &&
+        pt.thresholdState !== 'nominal' &&
+        pt.thresholdState !== 'standby' &&
+        pt.thresholdState !== 'disabled' && (
         <p className={pt.thresholdState.startsWith('approaching') ? 'text-amber-700 mt-0.5' : 'text-rose-700 mt-0.5'}>
           {pt.thresholdState === 'exceeded_max'
             ? '✖ Above Max Safety Limit'
@@ -49,7 +52,13 @@ function CustomTooltip({ active, payload, isHands }) {
   );
 }
 
-function KinematicStreamChart({ telemetrySeries, exercise, isHands, safetyLimits }) {
+function KinematicStreamChart({
+  telemetrySeries,
+  exercise,
+  isHands,
+  safetyLimits,
+  monitoringEnabled = false,
+}) {
   const startTs = telemetrySeries.length > 0 ? telemetrySeries[0].time : 0;
 
   const chartData = telemetrySeries.map((pt, idx) => {
@@ -132,7 +141,7 @@ function KinematicStreamChart({ telemetrySeries, exercise, isHands, safetyLimits
             />
           )}
 
-          {safetyLimits?.min != null && (
+          {monitoringEnabled && safetyLimits?.min != null && (
             <ReferenceLine
               yAxisId="primary"
               y={safetyLimits.min}
@@ -141,7 +150,7 @@ function KinematicStreamChart({ telemetrySeries, exercise, isHands, safetyLimits
               strokeDasharray="3 3"
             />
           )}
-          {safetyLimits?.max != null && (
+          {monitoringEnabled && safetyLimits?.max != null && (
             <ReferenceLine
               yAxisId="primary"
               y={safetyLimits.max}

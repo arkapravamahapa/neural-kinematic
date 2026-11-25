@@ -1,3 +1,164 @@
+export const CLINICAL_THRESHOLD_CATALOG = {
+  knee_flexion: {
+    protocolKey: 'knee_flexion',
+    protocolName: 'Knee Flexion (Squats)',
+    jointAxis: 'Hip (23) – Knee (25) – Ankle (27)',
+    unit: '°',
+    boundsMin: 0,
+    boundsMax: 180,
+    scaleNote: '180° = standing straight · lower angles = deeper knee bend.',
+    presets: [
+      {
+        id: 'knee_early',
+        stage: 'Early Rehab (Protected)',
+        min: 100,
+        max: 175,
+        targetMin: 110,
+        targetMax: 170,
+        rationale: 'Limits deep flexion beyond 100° to protect healing ACL, meniscus, or post-op tissues.',
+      },
+      {
+        id: 'knee_standard',
+        stage: 'Intermediate Functional',
+        min: 75,
+        max: 178,
+        targetMin: 85,
+        targetMax: 172,
+        rationale: 'Standard half-to-parallel squat corridor for balanced quadriceps and glute loading.',
+      },
+      {
+        id: 'knee_full',
+        stage: 'Full Mobility / Athletic',
+        min: 55,
+        max: 180,
+        targetMin: 70,
+        targetMax: 175,
+        rationale: 'Full active squat range while flagging extreme deep compression below 55°.',
+      },
+    ],
+  },
+  elbow_flexion: {
+    protocolKey: 'elbow_flexion',
+    protocolName: 'Elbow Flexion (Bicep Curls)',
+    jointAxis: 'Shoulder (11) – Elbow (13) – Wrist (15)',
+    unit: '°',
+    boundsMin: 0,
+    boundsMax: 180,
+    scaleNote: '180° = arm fully straight · lower angles = tighter elbow curl.',
+    presets: [
+      {
+        id: 'elbow_early',
+        stage: 'Early Tendon Protection',
+        min: 55,
+        max: 165,
+        targetMin: 60,
+        targetMax: 160,
+        rationale: 'Avoids terminal straight-arm lock-out and forceful end-range biceps flexion.',
+      },
+      {
+        id: 'elbow_standard',
+        stage: 'Standard Therapeutic ROM',
+        min: 35,
+        max: 175,
+        targetMin: 40,
+        targetMax: 168,
+        rationale: 'Covers functional daily flexion and controlled extension without joint snap.',
+      },
+      {
+        id: 'elbow_full',
+        stage: 'Full Active Conditioning',
+        min: 25,
+        max: 180,
+        targetMin: 35,
+        targetMax: 175,
+        rationale: 'Broad physiological elbow arc for late-stage upper-extremity strength.',
+      },
+    ],
+  },
+  shoulder_abduction: {
+    protocolKey: 'shoulder_abduction',
+    protocolName: 'Shoulder Abduction (Arm Raises)',
+    jointAxis: 'R.Shoulder (12) – L.Shoulder (11) – L.Elbow (13)',
+    unit: '°',
+    boundsMin: 0,
+    boundsMax: 180,
+    scaleNote: '~90° = arm resting at side · 175° = arm raised horizontally outward.',
+    presets: [
+      {
+        id: 'shoulder_early',
+        stage: 'Subacromial Safe Zone',
+        min: 90,
+        max: 145,
+        targetMin: 95,
+        targetMax: 140,
+        rationale: 'Caps lateral elevation below painful rotator-cuff impingement range.',
+      },
+      {
+        id: 'shoulder_standard',
+        stage: 'Standard Lateral Raise',
+        min: 80,
+        max: 175,
+        targetMin: 95,
+        targetMax: 170,
+        rationale: 'Restores controlled lateral abduction from neutral side rest to shoulder height.',
+      },
+      {
+        id: 'shoulder_full',
+        stage: 'Full Overhead Mobility',
+        min: 70,
+        max: 180,
+        targetMin: 90,
+        targetMax: 176,
+        rationale: 'Wide arc for unrestricted shoulder girdle mobility and late-stage recovery.',
+      },
+    ],
+  },
+  finger_pinch: {
+    protocolKey: 'finger_pinch',
+    protocolName: 'Fine-Motor Finger Pinch',
+    jointAxis: 'Thumb Tip (4) – Index Tip (8) · MCP (5)',
+    unit: '%',
+    boundsMin: 0,
+    boundsMax: 120,
+    scaleNote: '0% = thumb & index touching · 90–100% = open neutral hand aperture.',
+    presets: [
+      {
+        id: 'pinch_gentle',
+        stage: 'Gentle Carpal Tunnel Rehab',
+        min: 15,
+        max: 85,
+        targetMin: 20,
+        targetMax: 80,
+        rationale: 'Prevents high-pressure pinch compression and over-stretching sensitive flexor tendons.',
+      },
+      {
+        id: 'pinch_standard',
+        stage: 'Standard Dexterity Cycle',
+        min: 5,
+        max: 105,
+        targetMin: 10,
+        targetMax: 90,
+        rationale: 'Full thumb-to-index contact and neutral palm opening for fine-motor precision.',
+      },
+      {
+        id: 'pinch_wide',
+        stage: 'Wide Aperture Conditioning',
+        min: 2,
+        max: 118,
+        targetMin: 8,
+        targetMax: 105,
+        rationale: 'Allows maximal finger extension span while tracking clean tip-to-tip closure.',
+      },
+    ],
+  },
+};
+
+export function getProtocolCatalogEntry(exerciseKey) {
+  return (
+    CLINICAL_THRESHOLD_CATALOG[exerciseKey] || CLINICAL_THRESHOLD_CATALOG.knee_flexion
+  );
+}
+
 export function getDefaultSafetyLimits(exercise) {
   const isHands = exercise?.tracker === 'hands';
   const boundsMin = 0;
@@ -26,7 +187,7 @@ export function getDefaultSafetyLimits(exercise) {
   };
 }
 
-export function evaluateRomThreshold(value, limits, trackingStatus) {
+export function evaluateRomThreshold(value, limits, trackingStatus, enabled = true) {
   const safeLimits = limits || {
     min: 55,
     max: 176,
@@ -37,19 +198,32 @@ export function evaluateRomThreshold(value, limits, trackingStatus) {
     isHands: false,
   };
 
-  if (trackingStatus !== 'tracking' || !Number.isFinite(value)) {
+  const roundedVal = Number.isFinite(value) ? Number(value.toFixed(1)) : 0;
+
+  if (!enabled) {
     return {
-      state: 'standby',
+      state: 'disabled',
       severity: 'neutral',
-      label: '○ Standby',
-      message: 'Awaiting calibrated live kinematic stream.',
-      value: Number.isFinite(value) ? Number(value.toFixed(1)) : 0,
+      label: '○ Manual Mode (Alerts Off)',
+      message:
+        'Safety alerts are off to avoid unwanted warnings. Enter custom Min/Max limits or choose a preset from the Reference Chart, then click Apply & Arm.',
+      value: roundedVal,
       delta: 0,
     };
   }
 
-  const margin = safeLimits.isHands ? 6 : 5;
-  const roundedVal = Number(value.toFixed(1));
+  if (trackingStatus !== 'tracking' || !Number.isFinite(value)) {
+    return {
+      state: 'standby',
+      severity: 'neutral',
+      label: '○ Armed · Standby',
+      message: `Monitoring armed (${safeLimits.min}${safeLimits.unit}–${safeLimits.max}${safeLimits.unit}). Awaiting live kinematic stream.`,
+      value: roundedVal,
+      delta: 0,
+    };
+  }
+
+  const margin = safeLimits.isHands ? 4 : 3;
 
   if (value > safeLimits.max) {
     const delta = Number((value - safeLimits.max).toFixed(1));
@@ -103,7 +277,7 @@ export function evaluateRomThreshold(value, limits, trackingStatus) {
     state: 'nominal',
     severity: 'nominal',
     label: '● Within Safe ROM',
-    message: `Safely inside ${safeLimits.min}${safeLimits.unit}–${safeLimits.max}${safeLimits.unit} range corridor.`,
+    message: `Safely inside manual ${safeLimits.min}${safeLimits.unit}–${safeLimits.max}${safeLimits.unit} range corridor.`,
     value: roundedVal,
     delta: 0,
   };

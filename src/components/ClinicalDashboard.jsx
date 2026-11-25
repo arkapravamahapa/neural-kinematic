@@ -18,10 +18,12 @@ function ClinicalDashboard({
   onReset,
   safetyLimits,
   thresholdStatus,
+  thresholdMonitoringEnabled,
   breachStats,
   audioAlertEnabled,
   onToggleAudioAlert,
-  onUpdateSafetyLimits,
+  onApplySafetyLimits,
+  onSetThresholdMonitoringEnabled,
   onResetSafetyLimits,
   onTestAlertTone,
 }) {
@@ -136,7 +138,7 @@ function ClinicalDashboard({
     doc.text(`Posture Compensations: ${alertsText}`, 14, 96);
     if (safetyLimits) {
       doc.text(
-        `Safety Bounds (${safetyLimits.min}-${safetyLimits.max}${safetyLimits.unit}): Upper Breaches ${breachStats?.upperCount || 0} | Lower Breaches ${breachStats?.lowerCount || 0}`,
+        `Safety Bounds (${safetyLimits.min}-${safetyLimits.max}${safetyLimits.unit} · ${thresholdMonitoringEnabled ? 'Armed' : 'Manual Off'}): Upper Breaches ${breachStats?.upperCount || 0} | Lower Breaches ${breachStats?.lowerCount || 0}`,
         14,
         103
       );
@@ -321,13 +323,16 @@ function ClinicalDashboard({
       {/* ROM Safety Threshold Monitoring Panel */}
       {safetyLimits && (
         <ThresholdMonitor
+          key={exercise?.key || 'knee_flexion'}
           exercise={exercise}
           safetyLimits={safetyLimits}
           thresholdStatus={thresholdStatus}
+          monitoringEnabled={thresholdMonitoringEnabled}
           breachStats={breachStats}
           audioAlertEnabled={audioAlertEnabled}
           onToggleAudioAlert={onToggleAudioAlert}
-          onUpdateSafetyLimits={onUpdateSafetyLimits}
+          onApplySafetyLimits={onApplySafetyLimits}
+          onSetMonitoringEnabled={onSetThresholdMonitoringEnabled}
           onResetSafetyLimits={onResetSafetyLimits}
           onTestAlertTone={onTestAlertTone}
         />
@@ -356,6 +361,7 @@ function ClinicalDashboard({
           exercise={exercise}
           isHands={isHands}
           safetyLimits={safetyLimits}
+          monitoringEnabled={thresholdMonitoringEnabled}
         />
       </div>
 

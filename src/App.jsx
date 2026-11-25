@@ -13,6 +13,7 @@ import DoctorDashboard from './components/DoctorDashboard';
 import AIChat from './components/AIChat';
 import CalibrationWizard from './components/CalibrationWizard';
 import ProtocolGuide from './components/ProtocolGuide';
+import StreamStatusIndicator from './components/StreamStatusIndicator';
 import {
   evaluateTPose,
   evaluateHandCalibrationPose,
@@ -207,8 +208,34 @@ function App() {
   const [voiceEnabled, setVoiceEnabled] = useState(true);
   const [isPaused, setIsPaused] = useState(false);
 
-  const [wsConnected, setWsConnected] = useState(false);
-  const [modelReady, setModelReady] = useState(false);
+  const [webcamKey, setWebcamKey] = useState(0);
+  const [wsReconnectNonce, setWsReconnectNonce] = useState(0);
+  const [cameraStream, setCameraStream] = useState({
+    status: 'initializing',
+    deviceLabel: '',
+    resolution: '',
+    fps: 0,
+    errorMessage: '',
+    muted: false,
+  });
+  const [sensorStream, setSensorStream] = useState({
+    wsStatus: 'connecting',
+    modelStatus: 'loading',
+    modelError: '',
+    subjectDetected: false,
+    packetRateHz: 0,
+    lastPacketAgeSec: null,
+  });
+
+  const cameraTrackRef = useRef(null);
+  const streamCountersRef = useRef({
+    videoFrames: 0,
+    lastVideoTime: -1,
+    packets: 0,
+    lastPacketMs: null,
+    lastLandmarkMs: null,
+    lastFlushMs: 0,
+  });
 
   const [clinicalMetrics, setClinicalMetrics] = useState(INITIAL_METRICS);
   const [telemetrySeries, setTelemetrySeries] = useState([]);
@@ -218,6 +245,7 @@ function App() {
     createInitialCalibrationState('pose')
   );
   const [customSafetyLimits, setCustomSafetyLimits] = useState(null);
+  const [thresholdMonitoringEnabled, setThresholdMonitoringEnabled] = useState(false);
   const [audioAlertEnabled, setAudioAlertEnabled] = useState(true);
   const [breachStats, setBreachStats] = useState({
     upperCount: 0,
@@ -244,7 +272,8 @@ function App() {
   const thresholdStatus = evaluateRomThreshold(
     monitoredSignal,
     safetyLimits,
-    clinicalMetrics.status
+    clinicalMetrics.status,
+    thresholdMonitoringEnabled
   );
 
   const activeExerciseRef = useRef(activeExercise);
@@ -254,6 +283,7 @@ function App() {
   const targetRepsRef = useRef(targetReps);
   const targetGoalSpokenRef = useRef(false);
   const safetyLimitsRef = useRef(safetyLimits);
+  const thresholdMonitoringEnabledRef = useRef(thresholdMonitoringEnabled);
   const audioAlertEnabledRef = useRef(audioAlertEnabled);
   const thresholdStatusRef = useRef(thresholdStatus);
   const audioCtxRef = useRef(null);
@@ -268,6 +298,10 @@ function App() {
   useEffect(() => {
     safetyLimitsRef.current = safetyLimits;
   }, [safetyLimits]);
+
+  useEffect(() => {
+    thresholdMonitoringEnabledRef.current = thresholdMonitoringEnabled;
+  }, [thresholdMonitoringEnabled]);
 
   useEffect(() => {
     audioAlertEnabledRef.current = audioAlertEnabled;
@@ -364,19 +398,177 @@ function App() {
     fetchExercises();
   }, []);
 
+  const detachCameraTrackListeners = useCallback(() => {
+    const prev = cameraTrackRef.current;
+    if (prev && prev.track) {
+      prev.track.removeEventListener('ended', prev.onEnded);
+      prev.track.removeEventListener('mute', prev.onMute);
+      prev.track.removeEventListener('unmute', prev.onUnmute);
+    }
+    cameraTrackRef.current = null;
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      detachCameraTrackListeners();
+    };
+  }, [detachCameraTrackListeners]);
+
+  const handleUserMedia = useCallback(
+    (stream) => {
+      detachCameraTrackListeners();
+      const videoTrack = stream?.getVideoTracks?.()[0];
+      const settings = videoTrack?.getSettings ? videoTrack.getSettings() : {};
+      const resolution =
+        settings.width && settings.height ? `${settings.width}×${settings.height}` : '';
+
+      setCameraStream((prev) => ({
+        ...prev,
+        status: videoTrack && videoTrack.readyState === 'ended' ? 'disconnected' : 'live',
+        deviceLabel: videoTrack?.label || 'Camera Input',
+        resolution: resolution || prev.resolution,
+        errorMessage: '',
+        muted: Boolean(videoTrack?.muted),
+      }));
+
+      if (videoTrack) {
+        const onEnded = () => {
+          setCameraStream((prev) => ({
+            ...prev,
+            status: 'disconnected',
+            fps: 0,
+            errorMessage: 'Camera feed disconnected.',
+          }));
+        };
+        const onMute = () => {
+          setCameraStream((prev) => ({ ...prev, muted: true }));
+        };
+        const onUnmute = () => {
+          setCameraStream((prev) => ({ ...prev, muted: false, status: 'live', errorMessage: '' }));
+        };
+        videoTrack.addEventListener('ended', onEnded);
+        videoTrack.addEventListener('mute', onMute);
+        videoTrack.addEventListener('unmute', onUnmute);
+        cameraTrackRef.current = { track: videoTrack, onEnded, onMute, onUnmute };
+      }
+    },
+    [detachCameraTrackListeners]
+  );
+
+  const handleUserMediaError = useCallback(
+    (err) => {
+      detachCameraTrackListeners();
+      const errName = typeof err === 'string' ? err : err?.name || '';
+      const isDenied =
+        errName === 'NotAllowedError' || errName === 'PermissionDeniedError';
+      const isMissing =
+        errName === 'NotFoundError' || errName === 'DevicesNotFoundError';
+
+      setCameraStream((prev) => ({
+        ...prev,
+        status: isDenied ? 'denied' : isMissing ? 'disconnected' : 'error',
+        fps: 0,
+        muted: false,
+        errorMessage: isDenied
+          ? 'Camera permission blocked in browser settings.'
+          : isMissing
+          ? 'No camera device detected.'
+          : err?.message || 'Unable to access camera stream.',
+      }));
+    },
+    [detachCameraTrackListeners]
+  );
+
+  const handleRetryCamera = useCallback(() => {
+    detachCameraTrackListeners();
+    setCameraStream({
+      status: 'initializing',
+      deviceLabel: '',
+      resolution: '',
+      fps: 0,
+      errorMessage: '',
+      muted: false,
+    });
+    setWebcamKey((k) => k + 1);
+  }, [detachCameraTrackListeners]);
+
+  const handleReconnectSensor = useCallback(() => {
+    setSensorStream((prev) => ({ ...prev, wsStatus: 'reconnecting' }));
+    setWsReconnectNonce((n) => n + 1);
+  }, []);
+
+  useEffect(() => {
+    streamCountersRef.current.lastFlushMs = performance.now();
+    const interval = setInterval(() => {
+      const now = performance.now();
+      const counters = streamCountersRef.current;
+      const elapsedSec = Math.max(0.25, (now - counters.lastFlushMs) / 1000);
+      const fps = counters.videoFrames / elapsedSec;
+      const packetRateHz = counters.packets / elapsedSec;
+      const subjectDetected =
+        counters.lastLandmarkMs !== null && now - counters.lastLandmarkMs < 1500;
+      const lastPacketAgeSec =
+        counters.lastPacketMs !== null ? (now - counters.lastPacketMs) / 1000 : null;
+
+      counters.videoFrames = 0;
+      counters.packets = 0;
+      counters.lastFlushMs = now;
+
+      const video = webcamRef.current?.video;
+      const liveResolution =
+        video && video.videoWidth && video.videoHeight
+          ? `${video.videoWidth}×${video.videoHeight}`
+          : '';
+
+      setCameraStream((prev) => {
+        const nextResolution = liveResolution || prev.resolution;
+        const roundedFps = Number(fps.toFixed(1));
+        if (prev.fps === roundedFps && prev.resolution === nextResolution) {
+          return prev;
+        }
+        return {
+          ...prev,
+          fps: prev.status === 'live' ? roundedFps : 0,
+          resolution: nextResolution,
+        };
+      });
+
+      setSensorStream((prev) => {
+        const roundedHz = Number(packetRateHz.toFixed(1));
+        const roundedAge =
+          lastPacketAgeSec !== null ? Number(lastPacketAgeSec.toFixed(1)) : null;
+        if (
+          prev.packetRateHz === roundedHz &&
+          prev.subjectDetected === subjectDetected &&
+          prev.lastPacketAgeSec === roundedAge
+        ) {
+          return prev;
+        }
+        return {
+          ...prev,
+          packetRateHz: roundedHz,
+          subjectDetected,
+          lastPacketAgeSec: roundedAge,
+        };
+      });
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, []);
+
   const ensureTrackerLoaded = useCallback(async (trackerType) => {
     if (trackerType === 'pose' && poseLandmarkerRef.current) {
-      setModelReady(true);
+      setSensorStream((prev) => ({ ...prev, modelStatus: 'ready', modelError: '' }));
       return;
     }
     if (trackerType === 'hands' && handLandmarkerRef.current) {
-      setModelReady(true);
+      setSensorStream((prev) => ({ ...prev, modelStatus: 'ready', modelError: '' }));
       return;
     }
     if (loadingTrackerRef.current === trackerType) return;
 
     loadingTrackerRef.current = trackerType;
-    setModelReady(false);
+    setSensorStream((prev) => ({ ...prev, modelStatus: 'loading', modelError: '' }));
 
     try {
       if (!visionRef.current) {
@@ -395,9 +587,14 @@ function App() {
           numPoses: 1,
         });
       }
-      setModelReady(true);
+      setSensorStream((prev) => ({ ...prev, modelStatus: 'ready', modelError: '' }));
     } catch (err) {
       console.error(`Failed to initialize ${trackerType} landmarker:`, err);
+      setSensorStream((prev) => ({
+        ...prev,
+        modelStatus: 'error',
+        modelError: err?.message || `Failed to load ${trackerType} vision sensor.`,
+      }));
     } finally {
       if (loadingTrackerRef.current === trackerType) {
         loadingTrackerRef.current = null;
@@ -415,8 +612,9 @@ function App() {
     setTelemetryCount(0);
     setSessionStartTime(Date.now());
     setCustomSafetyLimits(null);
+    setThresholdMonitoringEnabled(false);
     setBreachStats({ upperCount: 0, lowerCount: 0, lastEvent: '' });
-    lastBreachStateRef.current = 'standby';
+    lastBreachStateRef.current = 'disabled';
     sessionLogRef.current = [];
     lastAlertSpoken.current = '';
     targetGoalSpokenRef.current = false;
@@ -448,6 +646,27 @@ function App() {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: 'reset_session' }));
     }
+  };
+
+  const handleApplySafetyLimits = (nextLimits, armMonitoring = true) => {
+    setCustomSafetyLimits(nextLimits);
+    setThresholdMonitoringEnabled(armMonitoring);
+    setBreachStats({ upperCount: 0, lowerCount: 0, lastEvent: '' });
+    lastBreachStateRef.current = armMonitoring ? 'standby' : 'disabled';
+  };
+
+  const handleSetThresholdMonitoringEnabled = (enabled) => {
+    setThresholdMonitoringEnabled(enabled);
+    lastBreachStateRef.current = enabled ? 'standby' : 'disabled';
+  };
+
+  const handleResetSafetyLimits = () => {
+    const defaults = getDefaultSafetyLimits(activeExercise);
+    setCustomSafetyLimits(null);
+    setThresholdMonitoringEnabled(false);
+    setBreachStats({ upperCount: 0, lowerCount: 0, lastEvent: '' });
+    lastBreachStateRef.current = 'disabled';
+    return defaults;
   };
 
   const handleRecalibrate = () => {
@@ -569,6 +788,13 @@ function App() {
       const video = webcamRef.current?.video;
       const canvas = canvasRef.current;
 
+      if (video && video.readyState === 4) {
+        if (video.currentTime !== streamCountersRef.current.lastVideoTime) {
+          streamCountersRef.current.lastVideoTime = video.currentTime;
+          streamCountersRef.current.videoFrames += 1;
+        }
+      }
+
       if (!isPausedRef.current && video && video.readyState === 4 && canvas) {
         const ctx = canvas.getContext('2d');
         if (ctx) {
@@ -664,6 +890,7 @@ function App() {
           if (isHands && handLandmarkerRef.current) {
             const handResult = handLandmarkerRef.current.detectForVideo(video, startTimeMs);
             if (handResult.landmarks && handResult.landmarks.length > 0) {
+              streamCountersRef.current.lastLandmarkMs = startTimeMs;
               const landmarks = handResult.landmarks[0];
               const drawingUtils = new DrawingUtils(ctx);
 
@@ -722,6 +949,7 @@ function App() {
           } else if (!isHands && poseLandmarkerRef.current) {
             const poseResult = poseLandmarkerRef.current.detectForVideo(video, startTimeMs);
             if (poseResult.landmarks && poseResult.landmarks.length > 0) {
+              streamCountersRef.current.lastLandmarkMs = startTimeMs;
               const landmarks = poseResult.landmarks[0];
               const drawingUtils = new DrawingUtils(ctx);
 
@@ -815,7 +1043,7 @@ function App() {
 
       ws.onopen = () => {
         if (isMounted) {
-          setWsConnected(true);
+          setSensorStream((prev) => ({ ...prev, wsStatus: 'connected' }));
           ws.send(
             JSON.stringify({
               type: 'select_exercise',
@@ -826,10 +1054,18 @@ function App() {
         }
       };
 
+      ws.onerror = () => {
+        if (isMounted) {
+          setSensorStream((prev) => ({ ...prev, wsStatus: 'disconnected' }));
+        }
+      };
+
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
           if (data.type === 'clinical_telemetry' && data.metrics) {
+            streamCountersRef.current.packets += 1;
+            streamCountersRef.current.lastPacketMs = performance.now();
             setClinicalMetrics(data.metrics);
 
             const activeLimits = safetyLimitsRef.current;
@@ -840,7 +1076,8 @@ function App() {
             const evalThreshold = evaluateRomThreshold(
               sigVal,
               activeLimits,
-              data.metrics.status
+              data.metrics.status,
+              thresholdMonitoringEnabledRef.current
             );
 
             if (data.metrics.status === 'tracking') {
@@ -922,7 +1159,7 @@ function App() {
 
       ws.onclose = () => {
         if (isMounted) {
-          setWsConnected(false);
+          setSensorStream((prev) => ({ ...prev, wsStatus: 'reconnecting' }));
           reconnectTimer = setTimeout(connectWebSocket, 1500);
         }
       };
@@ -935,7 +1172,7 @@ function App() {
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (wsRef.current) wsRef.current.close();
     };
-  }, [speakFeedback]);
+  }, [speakFeedback, wsReconnectNonce]);
 
   useEffect(() => {
     let cancelled = false;
@@ -987,6 +1224,15 @@ function App() {
           </nav>
 
           <div className="flex items-center gap-3 shrink-0">
+            <StreamStatusIndicator
+              cameraStream={cameraStream}
+              sensorStream={sensorStream}
+              trackerType={activeExercise.tracker}
+              calibrationStatus={calibrationState.status}
+              isPaused={isPaused}
+              onRetryCamera={handleRetryCamera}
+              onReconnectSensor={handleReconnectSensor}
+            />
             <button
               onClick={saveAndResetSession}
               className="bg-green-300 hover:bg-green-200 text-slate-950 border border-green-400 px-4 py-2 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600"
@@ -1043,13 +1289,6 @@ function App() {
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5 text-xs font-mono">
-            <span className={wsConnected ? 'text-emerald-800 font-medium' : 'text-amber-700 font-medium'}>
-              {wsConnected ? '● Linked' : '○ Connecting'}
-            </span>
-            <span className="text-green-300" aria-hidden="true">·</span>
-            <span className={modelReady ? 'text-green-800 font-medium' : 'text-slate-600'}>
-              {modelReady ? 'Vision Ready' : 'Loading...'}
-            </span>
 
             <button
               type="button"
@@ -1133,7 +1372,10 @@ function App() {
                 }`}
               >
                 <Webcam
+                  key={webcamKey}
                   ref={webcamRef}
+                  onUserMedia={handleUserMedia}
+                  onUserMediaError={handleUserMediaError}
                   className="absolute w-full h-full object-cover transform scale-x-[-1]"
                 />
                 <canvas
@@ -1197,11 +1439,13 @@ function App() {
               onReset={saveAndResetSession}
               safetyLimits={safetyLimits}
               thresholdStatus={thresholdStatus}
+              thresholdMonitoringEnabled={thresholdMonitoringEnabled}
               breachStats={breachStats}
               audioAlertEnabled={audioAlertEnabled}
               onToggleAudioAlert={() => setAudioAlertEnabled((prev) => !prev)}
-              onUpdateSafetyLimits={setCustomSafetyLimits}
-              onResetSafetyLimits={() => setCustomSafetyLimits(null)}
+              onApplySafetyLimits={handleApplySafetyLimits}
+              onSetThresholdMonitoringEnabled={handleSetThresholdMonitoringEnabled}
+              onResetSafetyLimits={handleResetSafetyLimits}
               onTestAlertTone={() => playThresholdAlertTone('exceeded_max', audioCtxRef)}
             />
             <SessionHistory patientId={patientId} refreshTrigger={historyTrigger} />
