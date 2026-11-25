@@ -137,9 +137,16 @@ function dist2D(a, b) {
   return Math.hypot(dx, dy);
 }
 
+const RIGHT_SIDE_JOINTS_MAP = {
+  knee_flexion_001: [24, 26, 28],
+  elbow_flexion_001: [12, 14, 16],
+  shoulder_abduction_001: [11, 12, 14],
+};
+
 export class PatientSessionAnalyzer {
   constructor(exerciseConfig) {
     this.config = exerciseConfig;
+    this.limbSide = 'Left';
     this.windowSize = exerciseConfig.tracker === 'hands' ? 11 : 15;
     this.polyOrder = 2;
     this.reset();
@@ -149,6 +156,25 @@ export class PatientSessionAnalyzer {
     this.config = exerciseConfig;
     this.windowSize = exerciseConfig.tracker === 'hands' ? 11 : 15;
     this.reset();
+  }
+
+  setSide(side) {
+    const valid = ['Left', 'Right', 'Bilateral'].includes(side) ? side : 'Left';
+    if (this.limbSide !== valid) {
+      this.limbSide = valid;
+      this.reset();
+    }
+  }
+
+  getActiveJoints() {
+    if (
+      this.config.tracker !== 'hands' &&
+      this.limbSide === 'Right' &&
+      RIGHT_SIDE_JOINTS_MAP[this.config.id]
+    ) {
+      return RIGHT_SIDE_JOINTS_MAP[this.config.id];
+    }
+    return this.config.primary_angle_joints || [];
   }
 
   reset() {
@@ -165,9 +191,15 @@ export class PatientSessionAnalyzer {
 
     this.baselineRepSignature = [];
     this.currentRepBuffer = [];
-    this.compensationAlerts = [];
+    this.currentRepJerkMax = 0;
+    this.currentRepCompensations = new Set();
+    this.repHistory = [];
 
-    this.phase = 'baseline'; // 'baseline' | 'active'
+    this.compensationAlerts = [];
+    this.activeCompensationSet = new Set();
+    this.compensationEventsCount = 0;
+
+    this.phase = 'baseline';
     this.baselineValue = null;
     this.extremumValue = null;
     this.repStartTime = null;
@@ -188,7 +220,7 @@ export class PatientSessionAnalyzer {
   }
 
   hasReliableLandmarks(landmarks) {
-    const required = [...(this.config.primary_angle_joints || [])];
+    const required = [...this.getActiveJoints()];
     if (this.config.tracker === 'hands') {
       required.push(...(this.config.pinch_landmarks || [4, 8]));
       required.push(...(this.config.palm_scale_landmarks || [0, 9]));
@@ -240,6 +272,98 @@ export class PatientSessionAnalyzer {
     return Array.from(alerts);
   }
 
+  _computeFatigueAnalysis() {
+    const total = this.repHistory.length;
+    if (total < 4) {
+      return {
+        status: 'collecting',
+        severity: 'neutral',
+        label: '○ Collecting Baseline',
+        summary: `Completed ${total}/4 reps required to compare baseline vs. late-set neuromuscular drift.`,
+        baselineCount: Math.min(3, total),
+        lateCount: 0,
+        baselineRom: total > 0 ? Number((this.repHistory.reduce((a, r) => a + r.romExcursion, 0) / total).toFixed(1)) : 0,
+        lateRom: 0,
+        romDeltaPct: 0,
+        baselineJerk: total > 0 ? Number((this.repHistory.reduce((a, r) => a + r.peakJerk, 0) / total).toFixed(1)) : 0,
+        lateJerk: 0,
+        jerkDeltaPct: 0,
+        baselineDtw: total > 0 ? Number((this.repHistory.reduce((a, r) => a + r.dtw, 0) / total).toFixed(1)) : 100,
+        lateDtw: 100,
+        dtwDeltaPts: 0,
+        findings: [],
+      };
+    }
+
+    const windowCount = Math.min(3, Math.floor(total / 2));
+    const baselineReps = this.repHistory.slice(0, windowCount);
+    const lateReps = this.repHistory.slice(-windowCount);
+
+    const avg = (arr, key) =>
+      arr.reduce((acc, item) => acc + Number(item[key] || 0), 0) / Math.max(1, arr.length);
+
+    const baselineRom = avg(baselineReps, 'romExcursion');
+    const lateRom = avg(lateReps, 'romExcursion');
+    const romDeltaPct =
+      baselineRom > 1 ? ((lateRom - baselineRom) / baselineRom) * 100 : 0;
+
+    const baselineJerk = avg(baselineReps, 'peakJerk');
+    const lateJerk = avg(lateReps, 'peakJerk');
+    const jerkDiff = lateJerk - baselineJerk;
+    const jerkDeltaPct =
+      baselineJerk >= 1 ? (jerkDiff / baselineJerk) * 100 : jerkDiff * 10;
+
+    const baselineDtw = avg(baselineReps, 'dtw');
+    const lateDtw = avg(lateReps, 'dtw');
+    const dtwDeltaPts = lateDtw - baselineDtw;
+
+    const findings = [];
+    if (romDeltaPct <= -10) {
+      findings.push(`Late-set ROM drop (${Math.round(romDeltaPct)}%)`);
+    }
+    if (jerkDeltaPct >= 25 || jerkDiff >= 8) {
+      const displayRise = Math.max(Math.round(jerkDeltaPct), Math.round(jerkDiff));
+      findings.push(`tremor rise (+${displayRise}%)`);
+    }
+    if (dtwDeltaPts <= -10) {
+      findings.push(`form consistency drift (${Math.round(dtwDeltaPts)} pts)`);
+    }
+
+    let severity = 'nominal';
+    let label = '● Stable Output';
+    if (findings.length >= 2 || romDeltaPct <= -20 || dtwDeltaPts <= -20) {
+      severity = 'critical';
+      label = '✖ High Fatigue Drift';
+    } else if (findings.length === 1) {
+      severity = 'warning';
+      label = '▲ Early Fatigue Drift';
+    }
+
+    const summary =
+      findings.length > 0
+        ? findings.join(' + ')
+        : `Consistent output across reps 1–${windowCount} vs. reps ${total - windowCount + 1}–${total}.`;
+
+    return {
+      status: 'active',
+      severity,
+      label,
+      summary,
+      baselineCount: windowCount,
+      lateCount: windowCount,
+      baselineRom: Number(baselineRom.toFixed(1)),
+      lateRom: Number(lateRom.toFixed(1)),
+      romDeltaPct: Number(romDeltaPct.toFixed(1)),
+      baselineJerk: Number(baselineJerk.toFixed(1)),
+      lateJerk: Number(lateJerk.toFixed(1)),
+      jerkDeltaPct: Number(jerkDeltaPct.toFixed(1)),
+      baselineDtw: Number(baselineDtw.toFixed(1)),
+      lateDtw: Number(lateDtw.toFixed(1)),
+      dtwDeltaPts: Number(dtwDeltaPts.toFixed(1)),
+      findings,
+    };
+  }
+
   processFrame(landmarks, timestamp) {
     const isHands = this.config.tracker === 'hands';
 
@@ -250,6 +374,7 @@ export class PatientSessionAnalyzer {
       return {
         status: 'buffering',
         tracker: this.config.tracker || 'pose',
+        limb_side: this.limbSide,
         exercise_id: this.config.id,
         reps: Number(this.repCount),
         smoothed_angle: 0,
@@ -260,10 +385,13 @@ export class PatientSessionAnalyzer {
         rom_min: 0,
         dtw_consistency: 100,
         alerts: [],
+        compensation_events: 0,
+        rep_history: [],
+        fatigue: this._computeFatigueAnalysis(),
       };
     }
 
-    const joints = this.config.primary_angle_joints;
+    const joints = this.getActiveJoints();
     const rawAngle = this.calculateAngle(
       landmarks[joints[0]],
       landmarks[joints[1]],
@@ -306,6 +434,17 @@ export class PatientSessionAnalyzer {
     }
 
     const currentCompensations = this.checkCompensations(landmarks);
+    const currentSet = new Set(currentCompensations);
+    for (const comp of currentSet) {
+      if (!this.activeCompensationSet.has(comp)) {
+        this.compensationEventsCount += 1;
+      }
+      if (this.phase === 'active') {
+        this.currentRepCompensations.add(comp);
+      }
+    }
+    this.activeCompensationSet = currentSet;
+
     if (currentCompensations.length > 0) {
       const merged = new Set([...this.compensationAlerts, ...currentCompensations]);
       this.compensationAlerts = Array.from(merged);
@@ -326,6 +465,7 @@ export class PatientSessionAnalyzer {
       const bufferingPayload = {
         status: 'buffering',
         tracker: this.config.tracker || 'pose',
+        limb_side: this.limbSide,
         exercise_id: this.config.id,
         reps: Number(this.repCount),
         smoothed_angle: Number(despikedAngle.toFixed(2)),
@@ -335,7 +475,10 @@ export class PatientSessionAnalyzer {
         rom_max: 0,
         rom_min: 0,
         dtw_consistency: 100,
-        alerts: [],
+        alerts: currentCompensations,
+        compensation_events: this.compensationEventsCount,
+        rep_history: this.repHistory,
+        fatigue: this._computeFatigueAnalysis(),
       };
       this.lastStatus = bufferingPayload;
       return bufferingPayload;
@@ -372,7 +515,11 @@ export class PatientSessionAnalyzer {
       if (currentPinchMm > this.pinchMaxMm) this.pinchMaxMm = currentPinchMm;
     }
 
-    // Drive rep state machine from pinch aperture for hand dexterity, or joint angle for pose
+    const jerkMetric = this._calculateJerk(isHands ? this.smoothedPinchHistory : this.smoothedHistory);
+    if (this.phase === 'active' && jerkMetric > this.currentRepJerkMax) {
+      this.currentRepJerkMax = jerkMetric;
+    }
+
     const activeSignal = isHands ? currentSmoothedPinch : currentSmoothedAngle;
     const minProminence = this.config.rep_trigger_prominence ?? 40;
     const minDurationSec = this.config.min_rep_duration_sec ?? 0.35;
@@ -400,9 +547,10 @@ export class PatientSessionAnalyzer {
           this.extremumValue = activeSignal;
           this.repStartTime = timestamp;
           this.currentRepBuffer = [activeSignal];
+          this.currentRepJerkMax = jerkMetric;
+          this.currentRepCompensations = new Set(currentCompensations);
         }
       } else {
-        // repDirection === 'increase' (e.g. shoulder abduction [12, 11, 13])
         if (activeSignal < this.baselineValue) {
           this.baselineValue = activeSignal;
         } else {
@@ -417,6 +565,8 @@ export class PatientSessionAnalyzer {
           this.extremumValue = activeSignal;
           this.repStartTime = timestamp;
           this.currentRepBuffer = [activeSignal];
+          this.currentRepJerkMax = jerkMetric;
+          this.currentRepCompensations = new Set(currentCompensations);
         }
       }
     } else if (this.phase === 'active') {
@@ -434,7 +584,7 @@ export class PatientSessionAnalyzer {
         if ((recovery >= requiredRecovery || returnedNearBaseline) && excursion >= minProminence) {
           const repDuration = timestamp - (this.repStartTime ?? timestamp);
           if (repDuration >= minDurationSec && this.currentRepBuffer.length >= minFramesPerRep) {
-            this._commitRep();
+            this._commitRep(excursion, repDuration);
             this.lastRepCompletedTime = timestamp;
           }
           this.phase = 'baseline';
@@ -442,12 +592,16 @@ export class PatientSessionAnalyzer {
           this.extremumValue = null;
           this.repStartTime = null;
           this.currentRepBuffer = [];
+          this.currentRepJerkMax = 0;
+          this.currentRepCompensations = new Set();
         } else if (returnedNearBaseline && excursion < minProminence) {
           this.phase = 'baseline';
           this.baselineValue = Math.max(this.baselineValue, activeSignal);
           this.extremumValue = null;
           this.repStartTime = null;
           this.currentRepBuffer = [];
+          this.currentRepJerkMax = 0;
+          this.currentRepCompensations = new Set();
         }
       } else {
         if (activeSignal > this.extremumValue) {
@@ -461,7 +615,7 @@ export class PatientSessionAnalyzer {
         if ((recovery >= requiredRecovery || returnedNearBaseline) && excursion >= minProminence) {
           const repDuration = timestamp - (this.repStartTime ?? timestamp);
           if (repDuration >= minDurationSec && this.currentRepBuffer.length >= minFramesPerRep) {
-            this._commitRep();
+            this._commitRep(excursion, repDuration);
             this.lastRepCompletedTime = timestamp;
           }
           this.phase = 'baseline';
@@ -469,21 +623,24 @@ export class PatientSessionAnalyzer {
           this.extremumValue = null;
           this.repStartTime = null;
           this.currentRepBuffer = [];
+          this.currentRepJerkMax = 0;
+          this.currentRepCompensations = new Set();
         } else if (returnedNearBaseline && excursion < minProminence) {
           this.phase = 'baseline';
           this.baselineValue = Math.min(this.baselineValue, activeSignal);
           this.extremumValue = null;
           this.repStartTime = null;
           this.currentRepBuffer = [];
+          this.currentRepJerkMax = 0;
+          this.currentRepCompensations = new Set();
         }
       }
     }
 
-    const jerkMetric = this._calculateJerk(isHands ? this.smoothedPinchHistory : this.smoothedHistory);
-
     const payload = {
       status: 'tracking',
       tracker: this.config.tracker || 'pose',
+      limb_side: this.limbSide,
       exercise_id: this.config.id,
       smoothed_angle: Number(currentSmoothedAngle.toFixed(2)),
       pinch_distance_mm: isHands ? Number(currentPinchMm.toFixed(1)) : 0,
@@ -495,13 +652,17 @@ export class PatientSessionAnalyzer {
       rom_max: Number(this.romMax.toFixed(2)),
       rom_min: Number(this.romMin.toFixed(2)),
       dtw_consistency: Number(this.lastDtwScore.toFixed(1)),
-      alerts: this.compensationAlerts.slice(-2),
+      alerts: currentCompensations,
+      session_alerts: this.compensationAlerts.slice(-3),
+      compensation_events: this.compensationEventsCount,
+      rep_history: this.repHistory.slice(-20),
+      fatigue: this._computeFatigueAnalysis(),
     };
     this.lastStatus = payload;
     return payload;
   }
 
-  _commitRep() {
+  _commitRep(excursion, repDurationSec) {
     this.repCount += 1;
     if (this.baselineRepSignature.length === 0) {
       this.baselineRepSignature = [...this.currentRepBuffer];
@@ -511,6 +672,15 @@ export class PatientSessionAnalyzer {
       const normLen = Math.max(this.baselineRepSignature.length, this.currentRepBuffer.length);
       this.lastDtwScore = Math.max(0, 100 - (distance / normLen) * 1.5);
     }
+
+    this.repHistory.push({
+      rep: this.repCount,
+      romExcursion: Number((excursion || 0).toFixed(1)),
+      peakJerk: Number((this.currentRepJerkMax || 0).toFixed(1)),
+      dtw: Number(this.lastDtwScore.toFixed(1)),
+      durationSec: Number((repDurationSec || 0).toFixed(2)),
+      hadCompensation: this.currentRepCompensations.size > 0,
+    });
   }
 
   _calculateJerk(series) {

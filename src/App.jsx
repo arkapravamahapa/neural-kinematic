@@ -14,9 +14,13 @@ import AIChat from './components/AIChat';
 import CalibrationWizard from './components/CalibrationWizard';
 import ProtocolGuide from './components/ProtocolGuide';
 import StreamStatusIndicator from './components/StreamStatusIndicator';
+import ThresholdMonitor from './components/ThresholdMonitor';
+import ClinicalInsightsPanel from './components/ClinicalInsightsPanel';
+import RehabPrescriptionPanel from './components/RehabPrescriptionPanel';
 import {
   evaluateTPose,
   evaluateHandCalibrationPose,
+  extractCalibrationSample,
   computeNormalizationProfile,
   normalizeLandmarks,
 } from './utils/calibration';
@@ -25,6 +29,12 @@ import {
   evaluateRomThreshold,
   playThresholdAlertTone,
 } from './utils/thresholdMonitor';
+import {
+  getSideJoints,
+  getDefaultPrescription,
+  formatPrescriptionSummary,
+  computeAdherenceMetrics,
+} from './utils/clinicalAnalytics';
 
 const CALIBRATION_DURATION_SEC = 3.0;
 
@@ -159,6 +169,7 @@ const PATIENT_PROFILES = [
 const INITIAL_METRICS = {
   status: 'initializing',
   tracker: 'pose',
+  limb_side: 'Left',
   smoothed_angle: 0,
   pinch_distance_mm: 0,
   pinch_aperture: 0,
@@ -169,6 +180,9 @@ const INITIAL_METRICS = {
   rom_max: 0,
   rom_min: 0,
   dtw_consistency: 100,
+  compensation_events: 0,
+  rep_history: [],
+  fatigue: null,
   alerts: [],
 };
 
@@ -252,18 +266,39 @@ function App() {
     lowerCount: 0,
     lastEvent: '',
   });
+  const [limbSide, setLimbSide] = useState('Left');
+  const [involvedSide, setInvolvedSide] = useState('Left');
+  const [prescriptionsByKey, setPrescriptionsByKey] = useState({});
+  const [completedSets, setCompletedSets] = useState(0);
+  const [patientSessions, setPatientSessions] = useState([]);
+  const [adherenceCounters, setAdherenceCounters] = useState({
+    totalFrames: 0,
+    safeZoneFrames: 0,
+  });
 
   const calibrationRef = useRef({
     status: 'calibrating',
     step: 1,
     holdStartMs: null,
+    manualHoldActive: false,
     samples: [],
     profile: null,
     lastUiSyncMs: 0,
     lastFeedback: '',
   });
+  const latestLandmarksRef = useRef({ tracker: null, landmarks: null });
+  const manualHoldTimerRef = useRef(null);
 
   const activeExercise = exercises[selectedExerciseKey] || DEFAULT_EXERCISES.knee_flexion;
+  const activePrescription =
+    prescriptionsByKey[selectedExerciseKey] || getDefaultPrescription(activeExercise);
+  const adherenceMetrics = computeAdherenceMetrics({
+    totalFrames: adherenceCounters.totalFrames,
+    safeZoneFrames: adherenceCounters.safeZoneFrames,
+    compensationEvents: clinicalMetrics.compensation_events || 0,
+    reps: clinicalMetrics.reps || 0,
+    prescription: activePrescription,
+  });
   const safetyLimits = customSafetyLimits || getDefaultSafetyLimits(activeExercise);
   const monitoredSignal =
     (clinicalMetrics.tracker || activeExercise.tracker) === 'hands'
@@ -278,6 +313,8 @@ function App() {
 
   const activeExerciseRef = useRef(activeExercise);
   const selectedExerciseKeyRef = useRef(selectedExerciseKey);
+  const limbSideRef = useRef(limbSide);
+  const activePrescriptionRef = useRef(activePrescription);
   const isPausedRef = useRef(isPaused);
   const voiceEnabledRef = useRef(voiceEnabled);
   const targetRepsRef = useRef(targetReps);
@@ -294,6 +331,14 @@ function App() {
     activeExerciseRef.current = activeExercise;
     selectedExerciseKeyRef.current = selectedExerciseKey;
   }, [activeExercise, selectedExerciseKey]);
+
+  useEffect(() => {
+    limbSideRef.current = limbSide;
+  }, [limbSide]);
+
+  useEffect(() => {
+    activePrescriptionRef.current = activePrescription;
+  }, [activePrescription]);
 
   useEffect(() => {
     safetyLimitsRef.current = safetyLimits;
@@ -367,19 +412,98 @@ function App() {
     });
   }, []);
 
-  const startCalibration = useCallback((trackerType) => {
-    const initial = createInitialCalibrationState(trackerType);
-    calibrationRef.current = {
-      status: 'calibrating',
-      step: 1,
-      holdStartMs: null,
-      samples: [],
-      profile: null,
-      lastUiSyncMs: 0,
-      lastFeedback: initial.feedback,
-    };
-    setCalibrationState(initial);
+  const clearManualHoldTimer = useCallback(() => {
+    if (manualHoldTimerRef.current) {
+      clearInterval(manualHoldTimerRef.current);
+      manualHoldTimerRef.current = null;
+    }
   }, []);
+
+  useEffect(() => {
+    return () => {
+      clearManualHoldTimer();
+    };
+  }, [clearManualHoldTimer]);
+
+  const startCalibration = useCallback(
+    (trackerType, customFeedback) => {
+      clearManualHoldTimer();
+      const initial = createInitialCalibrationState(trackerType);
+      const feedback = customFeedback || initial.feedback;
+      calibrationRef.current = {
+        status: 'calibrating',
+        step: 1,
+        holdStartMs: null,
+        manualHoldActive: false,
+        samples: [],
+        profile: null,
+        lastUiSyncMs: 0,
+        lastFeedback: feedback,
+      };
+      setCalibrationState({ ...initial, feedback });
+    },
+    [clearManualHoldTimer]
+  );
+
+  const finalizeCalibration = useCallback(
+    (trackerType, allowFallback = true) => {
+      clearManualHoldTimer();
+      const cal = calibrationRef.current;
+      const samples = [...cal.samples];
+
+      if (
+        samples.length === 0 &&
+        latestLandmarksRef.current.tracker === trackerType &&
+        latestLandmarksRef.current.landmarks
+      ) {
+        const snap = extractCalibrationSample(
+          latestLandmarksRef.current.landmarks,
+          trackerType
+        );
+        if (snap) samples.push(snap);
+      }
+
+      let profile = computeNormalizationProfile(samples, trackerType);
+      if (!profile && allowFallback) {
+        profile = {
+          skipped: true,
+          manualFallback: true,
+          tracker: trackerType,
+          calibratedAt: new Date().toISOString(),
+          sampleCount: 0,
+          scale: trackerType === 'hands' ? 0.16 : 0.28,
+        };
+      }
+      if (!profile) return false;
+
+      cal.status = 'calibrated';
+      cal.step = 3;
+      cal.holdStartMs = null;
+      cal.manualHoldActive = false;
+      cal.profile = profile;
+
+      const feedback = profile.manualFallback
+        ? 'Baseline calibration active. Live tracking started.'
+        : 'Coordinates normalized. Tracking active.';
+
+      syncCalibrationUi(
+        {
+          status: 'calibrated',
+          step: 3,
+          progressSec: CALIBRATION_DURATION_SEC,
+          feedback,
+          profile,
+        },
+        true
+      );
+      speakFeedback('Calibration complete. Begin exercise.');
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({ type: 'reset_session' }));
+      }
+      return true;
+    },
+    [clearManualHoldTimer, speakFeedback, syncCalibrationUi]
+  );
 
   useEffect(() => {
     const fetchExercises = async () => {
@@ -397,6 +521,27 @@ function App() {
     };
     fetchExercises();
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadPrescriptions = async () => {
+      try {
+        const res = await fetch(`/api/prescriptions/${encodeURIComponent(patientId)}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (!cancelled && data && typeof data === 'object') {
+            setPrescriptionsByKey(data);
+          }
+        }
+      } catch (err) {
+        console.error('Failed to load patient prescriptions:', err);
+      }
+    };
+    loadPrescriptions();
+    return () => {
+      cancelled = true;
+    };
+  }, [patientId]);
 
   const detachCameraTrackListeners = useCallback(() => {
     const prev = cameraTrackRef.current;
@@ -606,14 +751,22 @@ function App() {
     const nextConfig = exercises[nextKey] || DEFAULT_EXERCISES[nextKey];
     if (!nextConfig) return;
 
+    const nextRx = prescriptionsByKey[nextKey] || getDefaultPrescription(nextConfig);
     setSelectedExerciseKey(nextKey);
-    setClinicalMetrics({ ...INITIAL_METRICS, tracker: nextConfig.tracker });
+    setTargetReps(nextRx.targetReps || 10);
+    setCompletedSets(0);
+    setClinicalMetrics({
+      ...INITIAL_METRICS,
+      tracker: nextConfig.tracker,
+      limb_side: limbSideRef.current,
+    });
     setTelemetrySeries([]);
     setTelemetryCount(0);
     setSessionStartTime(Date.now());
     setCustomSafetyLimits(null);
     setThresholdMonitoringEnabled(false);
     setBreachStats({ upperCount: 0, lowerCount: 0, lastEvent: '' });
+    setAdherenceCounters({ totalFrames: 0, safeZoneFrames: 0 });
     lastBreachStateRef.current = 'disabled';
     sessionLogRef.current = [];
     lastAlertSpoken.current = '';
@@ -628,17 +781,23 @@ function App() {
           type: 'select_exercise',
           exercise_key: nextKey,
           exercise_id: nextConfig.id,
+          limb_side: limbSideRef.current,
         })
       );
     }
   };
 
   const resetCurrentTelemetry = () => {
-    setClinicalMetrics({ ...INITIAL_METRICS, tracker: activeExercise.tracker });
+    setClinicalMetrics({
+      ...INITIAL_METRICS,
+      tracker: activeExercise.tracker,
+      limb_side: limbSideRef.current,
+    });
     setTelemetrySeries([]);
     setTelemetryCount(0);
     setSessionStartTime(Date.now());
     setBreachStats({ upperCount: 0, lowerCount: 0, lastEvent: '' });
+    setAdherenceCounters({ totalFrames: 0, safeZoneFrames: 0 });
     lastBreachStateRef.current = 'standby';
     sessionLogRef.current = [];
     lastAlertSpoken.current = '';
@@ -646,6 +805,105 @@ function App() {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: 'reset_session' }));
     }
+  };
+
+  const handleLimbSideChange = (nextSide) => {
+    if (!['Left', 'Right', 'Bilateral'].includes(nextSide)) return;
+    setLimbSide(nextSide);
+    limbSideRef.current = nextSide;
+    setClinicalMetrics({
+      ...INITIAL_METRICS,
+      tracker: activeExercise.tracker,
+      limb_side: nextSide,
+    });
+    setTelemetrySeries([]);
+    setTelemetryCount(0);
+    setSessionStartTime(Date.now());
+    setBreachStats({ upperCount: 0, lowerCount: 0, lastEvent: '' });
+    setAdherenceCounters({ totalFrames: 0, safeZoneFrames: 0 });
+    lastBreachStateRef.current = 'standby';
+    sessionLogRef.current = [];
+    lastAlertSpoken.current = '';
+    targetGoalSpokenRef.current = false;
+
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          type: 'select_side',
+          limb_side: nextSide,
+        })
+      );
+    }
+  };
+
+  const handlePatientChange = (nextPatientId) => {
+    setPatientId(nextPatientId);
+    setCompletedSets(0);
+    resetCurrentTelemetry();
+  };
+
+  const handleSavePrescription = async (nextRx) => {
+    try {
+      const res = await fetch('/api/prescriptions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          patient_id: patientId,
+          exercise_key: selectedExerciseKey,
+          targetSets: nextRx.targetSets,
+          targetReps: nextRx.targetReps,
+          safeMin: nextRx.safeMin,
+          safeMax: nextRx.safeMax,
+          maxCompensations: nextRx.maxCompensations,
+          involvedSide: nextRx.involvedSide,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const saved = data.prescription || {
+          ...nextRx,
+          updatedAt: new Date().toISOString(),
+        };
+        setPrescriptionsByKey((prev) => ({
+          ...prev,
+          [selectedExerciseKey]: saved,
+        }));
+      } else {
+        setPrescriptionsByKey((prev) => ({
+          ...prev,
+          [selectedExerciseKey]: {
+            ...nextRx,
+            updatedAt: new Date().toISOString(),
+          },
+        }));
+      }
+    } catch (err) {
+      console.error('Error saving prescription:', err);
+      setPrescriptionsByKey((prev) => ({
+        ...prev,
+        [selectedExerciseKey]: {
+          ...nextRx,
+          updatedAt: new Date().toISOString(),
+        },
+      }));
+    }
+
+    setTargetReps(nextRx.targetReps);
+    if (nextRx.involvedSide === 'Left' || nextRx.involvedSide === 'Right') {
+      setInvolvedSide(nextRx.involvedSide);
+    }
+    setAdherenceCounters({ totalFrames: 0, safeZoneFrames: 0 });
+  };
+
+  const handleSyncPrescriptionToThresholds = (minVal, maxVal) => {
+    handleApplySafetyLimits(
+      {
+        ...safetyLimits,
+        min: minVal,
+        max: maxVal,
+      },
+      true
+    );
   };
 
   const handleApplySafetyLimits = (nextLimits, armMonitoring = true) => {
@@ -674,12 +932,97 @@ function App() {
     startCalibration(activeExercise.tracker);
   };
 
+  const handleSelectCalibrationStep = (stepId) => {
+    const trackerType = activeExercise.tracker || 'pose';
+    const isHands = trackerType === 'hands';
+
+    if (stepId === 1) {
+      startCalibration(
+        trackerType,
+        isHands
+          ? 'Step 1 active — frame your open hand clearly, then click Step 2.'
+          : 'Step 1 active — center your body in frame, then click Step 2.'
+      );
+      return;
+    }
+
+    if (stepId === 2) {
+      clearManualHoldTimer();
+      const startMs = performance.now();
+      const initialSamples = [];
+      if (
+        latestLandmarksRef.current.tracker === trackerType &&
+        latestLandmarksRef.current.landmarks
+      ) {
+        const snap = extractCalibrationSample(
+          latestLandmarksRef.current.landmarks,
+          trackerType
+        );
+        if (snap) initialSamples.push(snap);
+      }
+
+      const holdPrompt = isHands
+        ? 'Hold open palm steady for 3.0s...'
+        : 'Hold T-pose steady for 3.0s...';
+
+      calibrationRef.current = {
+        status: 'calibrating',
+        step: 2,
+        holdStartMs: startMs,
+        manualHoldActive: true,
+        samples: initialSamples,
+        profile: null,
+        lastUiSyncMs: startMs,
+        lastFeedback: holdPrompt,
+      };
+      setCalibrationState({
+        status: 'calibrating',
+        step: 2,
+        progressSec: 0,
+        durationSec: CALIBRATION_DURATION_SEC,
+        feedback: holdPrompt,
+        profile: null,
+      });
+
+      manualHoldTimerRef.current = setInterval(() => {
+        const cal = calibrationRef.current;
+        if (!cal.manualHoldActive || cal.status === 'calibrated') {
+          clearManualHoldTimer();
+          return;
+        }
+        const elapsedSec = (performance.now() - startMs) / 1000;
+        if (elapsedSec >= CALIBRATION_DURATION_SEC) {
+          finalizeCalibration(trackerType, true);
+          return;
+        }
+        const remaining = Math.max(0.1, CALIBRATION_DURATION_SEC - elapsedSec).toFixed(1);
+        setCalibrationState({
+          status: 'calibrating',
+          step: 2,
+          progressSec: elapsedSec,
+          durationSec: CALIBRATION_DURATION_SEC,
+          feedback: isHands
+            ? `Holding open palm... ${remaining}s remaining`
+            : `Holding T-pose... ${remaining}s remaining`,
+          profile: null,
+        });
+      }, 100);
+      return;
+    }
+
+    if (stepId === 3) {
+      finalizeCalibration(trackerType, true);
+    }
+  };
+
   const handleSkipCalibration = () => {
+    clearManualHoldTimer();
     const skippedProfile = { skipped: true };
     calibrationRef.current = {
       status: 'calibrated',
       step: 3,
       holdStartMs: null,
+      manualHoldActive: false,
       samples: [],
       profile: skippedProfile,
       lastUiSyncMs: performance.now(),
@@ -699,8 +1042,12 @@ function App() {
   const exportSessionCSV = () => {
     const rows = sessionLogRef.current;
     const t0 = rows.length > 0 ? rows[0].time : Date.now();
+    const isHands = activeExercise.tracker === 'hands';
+    const rxSummary = formatPrescriptionSummary(activePrescription, isHands ? '%' : '°');
+    const fatigueSummary = clinicalMetrics.fatigue?.summary || 'Collecting baseline';
+
     const csvHeader =
-      'Timestamp_ISO,Elapsed_s,Patient_ID,Protocol_ID,Protocol_Name,Smoothed_Angle_deg,Pinch_Aperture_pct,Pinch_Distance_mm,Rep_Count,Jerk_RMS,DTW_Form_Match_pct,Threshold_State,Compensation_Alerts\n';
+      'Timestamp_ISO,Elapsed_s,Patient_ID,Protocol_ID,Protocol_Name,Limb_Side,Smoothed_Angle_deg,Pinch_Aperture_pct,Pinch_Distance_mm,Rep_Count,Jerk_RMS,DTW_Form_Match_pct,Threshold_State,Safe_Zone_Frame,Adherence_Score_pct,Safe_Zone_pct,Fatigue_Insight,Prescription_Target,Compensation_Alerts\n';
 
     const sourceRows =
       rows.length > 0
@@ -708,6 +1055,7 @@ function App() {
         : [
             {
               time: Date.now(),
+              limbSide,
               angle: clinicalMetrics.smoothed_angle || 0,
               pinchAperture: clinicalMetrics.pinch_aperture || 0,
               pinchMm: clinicalMetrics.pinch_distance_mm || 0,
@@ -715,6 +1063,8 @@ function App() {
               jerk: clinicalMetrics.jerk_score || 0,
               dtw: clinicalMetrics.dtw_consistency ?? 100,
               thresholdState: thresholdStatus.state,
+              safeZoneOk: true,
+              fatigueSummary,
               alerts: (clinicalMetrics.alerts || []).join(' | '),
             },
           ];
@@ -727,6 +1077,7 @@ function App() {
           patientId,
           activeExercise.id,
           activeExercise.name,
+          row.limbSide || limbSide,
           row.angle,
           row.pinchAperture ?? 0,
           row.pinchMm ?? 0,
@@ -734,6 +1085,11 @@ function App() {
           row.jerk,
           row.dtw,
           row.thresholdState || 'nominal',
+          row.safeZoneOk ? 'YES' : 'NO',
+          adherenceMetrics.adherenceScore,
+          adherenceMetrics.safeZonePct,
+          row.fatigueSummary || fatigueSummary,
+          rxSummary,
           row.alerts || '',
         ]
           .map(escapeCsvCell)
@@ -745,7 +1101,10 @@ function App() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.setAttribute('href', url);
-    link.setAttribute('download', `kinematic_${selectedExerciseKey}_${patientId}_${Date.now()}.csv`);
+    link.setAttribute(
+      'download',
+      `kinematic_${selectedExerciseKey}_${limbSide.toLowerCase()}_${patientId}_${Date.now()}.csv`
+    );
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -759,6 +1118,13 @@ function App() {
       exportSessionCSV();
     }
 
+    const isHands = activeExercise.tracker === 'hands';
+    const romExcursion = Math.max(
+      0,
+      Number(((clinicalMetrics.rom_max || 0) - (clinicalMetrics.rom_min || 0)).toFixed(1))
+    );
+    const rxSummary = formatPrescriptionSummary(activePrescription, isHands ? '%' : '°');
+
     try {
       await fetch('/api/save_session', {
         method: 'POST',
@@ -766,10 +1132,21 @@ function App() {
         body: JSON.stringify({
           patient_id: patientId,
           exercise_id: activeExercise.id,
+          exercise_key: selectedExerciseKey,
+          limbSide,
           leftMaxROM: clinicalMetrics.rom_max,
           rightMaxROM: clinicalMetrics.rom_max,
+          romMin: clinicalMetrics.rom_min,
+          romExcursion,
           symmetryScore: clinicalMetrics.dtw_consistency,
           repCount: clinicalMetrics.reps,
+          adherenceScore: adherenceMetrics.adherenceScore,
+          safeZonePct: adherenceMetrics.safeZonePct,
+          compensationCount: clinicalMetrics.compensation_events || 0,
+          fatigueSeverity: clinicalMetrics.fatigue?.severity || 'neutral',
+          fatigueSummary: clinicalMetrics.fatigue?.summary || '',
+          romDeltaPct: clinicalMetrics.fatigue?.romDeltaPct || 0,
+          prescriptionSummary: rxSummary,
           notes: clinicalNotes,
         }),
       });
@@ -813,6 +1190,25 @@ function App() {
             const cal = calibrationRef.current;
             if (cal.status === 'calibrated') return true;
 
+            if (cal.manualHoldActive) {
+              if (!isHands && landmarks?.[11] && landmarks?.[12]) {
+                const shoulderY =
+                  ((landmarks[11].y + landmarks[12].y) / 2) * canvas.height;
+                ctx.save();
+                ctx.strokeStyle = 'rgba(134, 239, 172, 0.7)';
+                ctx.lineWidth = 2;
+                ctx.setLineDash([8, 6]);
+                ctx.beginPath();
+                ctx.moveTo(0, shoulderY);
+                ctx.lineTo(canvas.width, shoulderY);
+                ctx.stroke();
+                ctx.restore();
+              }
+              const sample = extractCalibrationSample(landmarks, isHands ? 'hands' : 'pose');
+              if (sample) cal.samples.push(sample);
+              return false;
+            }
+
             const evalResult = isHands
               ? evaluateHandCalibrationPose(landmarks)
               : evaluateTPose(landmarks);
@@ -853,28 +1249,7 @@ function App() {
 
             const elapsedSec = (startTimeMs - cal.holdStartMs) / 1000;
             if (elapsedSec >= CALIBRATION_DURATION_SEC) {
-              const profile = computeNormalizationProfile(
-                cal.samples,
-                isHands ? 'hands' : 'pose'
-              );
-              cal.status = 'calibrated';
-              cal.step = 3;
-              cal.profile = profile;
-              syncCalibrationUi(
-                {
-                  status: 'calibrated',
-                  step: 3,
-                  progressSec: CALIBRATION_DURATION_SEC,
-                  feedback: 'Coordinates normalized. Tracking active.',
-                  profile,
-                },
-                true
-              );
-              speakFeedback('Calibration complete. Begin exercise.');
-              if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                wsRef.current.send(JSON.stringify({ type: 'reset_session' }));
-              }
-              return true;
+              return finalizeCalibration(isHands ? 'hands' : 'pose', true);
             }
 
             syncCalibrationUi({
@@ -892,6 +1267,7 @@ function App() {
             if (handResult.landmarks && handResult.landmarks.length > 0) {
               streamCountersRef.current.lastLandmarkMs = startTimeMs;
               const landmarks = handResult.landmarks[0];
+              latestLandmarksRef.current = { tracker: 'hands', landmarks };
               const drawingUtils = new DrawingUtils(ctx);
 
               drawingUtils.drawConnectors(landmarks, HandLandmarker.HAND_CONNECTIONS, {
@@ -930,11 +1306,15 @@ function App() {
                     tracker: 'hands',
                     exercise_key: exKey,
                     exercise_id: exercise.id,
+                    limb_side: limbSideRef.current,
                     landmarks: outboundLandmarks,
                   })
                 );
               }
-            } else if (calibrationRef.current.status !== 'calibrated') {
+            } else if (
+              calibrationRef.current.status !== 'calibrated' &&
+              !calibrationRef.current.manualHoldActive
+            ) {
               calibrationRef.current.holdStartMs = null;
               calibrationRef.current.samples = [];
               calibrationRef.current.step = 1;
@@ -951,6 +1331,7 @@ function App() {
             if (poseResult.landmarks && poseResult.landmarks.length > 0) {
               streamCountersRef.current.lastLandmarkMs = startTimeMs;
               const landmarks = poseResult.landmarks[0];
+              latestLandmarksRef.current = { tracker: 'pose', landmarks };
               const drawingUtils = new DrawingUtils(ctx);
 
               drawingUtils.drawConnectors(landmarks, PoseLandmarker.POSE_CONNECTIONS, {
@@ -962,7 +1343,7 @@ function App() {
                 radius: 3.5,
               });
 
-              const joints = exercise.primary_angle_joints || [];
+              const joints = getSideJoints(exercise, limbSideRef.current);
               if (
                 joints.length === 3 &&
                 landmarks[joints[0]] &&
@@ -1006,11 +1387,15 @@ function App() {
                     tracker: 'pose',
                     exercise_key: exKey,
                     exercise_id: exercise.id,
+                    limb_side: limbSideRef.current,
                     landmarks: outboundLandmarks,
                   })
                 );
               }
-            } else if (calibrationRef.current.status !== 'calibrated') {
+            } else if (
+              calibrationRef.current.status !== 'calibrated' &&
+              !calibrationRef.current.manualHoldActive
+            ) {
               calibrationRef.current.holdStartMs = null;
               calibrationRef.current.samples = [];
               calibrationRef.current.step = 1;
@@ -1028,7 +1413,7 @@ function App() {
 
       requestRef.current = requestAnimationFrame(detectMovement);
     },
-    [speakFeedback, syncCalibrationUi]
+    [finalizeCalibration, syncCalibrationUi]
   );
 
   useEffect(() => {
@@ -1049,6 +1434,7 @@ function App() {
               type: 'select_exercise',
               exercise_key: selectedExerciseKeyRef.current,
               exercise_id: activeExerciseRef.current.id,
+              limb_side: limbSideRef.current,
             })
           );
         }
@@ -1082,9 +1468,21 @@ function App() {
 
             if (data.metrics.status === 'tracking') {
               const nowMs = Date.now();
+              const rx = activePrescriptionRef.current;
+              const safeZoneOk =
+                sigVal >= rx.safeMin &&
+                sigVal <= rx.safeMax &&
+                (!data.metrics.alerts || data.metrics.alerts.length === 0);
+
+              setAdherenceCounters((prev) => ({
+                totalFrames: prev.totalFrames + 1,
+                safeZoneFrames: prev.safeZoneFrames + (safeZoneOk ? 1 : 0),
+              }));
+
               const point = {
                 time: nowMs,
                 protocol: selectedExerciseKeyRef.current,
+                limbSide: limbSideRef.current,
                 angle: data.metrics.smoothed_angle,
                 pinchAperture: data.metrics.pinch_aperture || 0,
                 pinchMm: data.metrics.pinch_distance_mm || 0,
@@ -1092,6 +1490,8 @@ function App() {
                 jerk: data.metrics.jerk_score,
                 dtw: data.metrics.dtw_consistency,
                 thresholdState: evalThreshold.state,
+                safeZoneOk,
+                fatigueSummary: data.metrics.fatigue?.summary || '',
                 alerts: (data.metrics.alerts || []).join(' | '),
               };
               sessionLogRef.current.push(point);
@@ -1194,8 +1594,8 @@ function App() {
   return (
     <div className="min-h-screen bg-green-100 text-slate-900 font-sans flex flex-col">
       {/* 3-Zone Top Navigation Contract */}
-      <header className="bg-green-50/95 backdrop-blur-md border-b border-green-200 px-6 py-3.5 sticky top-0 z-30">
-        <div className="max-w-7xl mx-auto flex items-center justify-between gap-8">
+      <header className="bg-green-50/95 backdrop-blur-md border-b border-green-200 px-5 py-2.5 sticky top-0 z-30">
+        <div className="max-w-[1440px] mx-auto flex items-center justify-between gap-6">
           <span className="text-lg font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0">
             Neural-Kinematic
           </span>
@@ -1244,8 +1644,8 @@ function App() {
       </header>
 
       {/* Protocol & Patient Command Bar */}
-      <div className="bg-green-50/80 border-b border-green-200 px-6 py-3">
-        <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-4">
+      <div className="bg-green-50/80 border-b border-green-200 px-5 py-2">
+        <div className="max-w-[1440px] mx-auto flex flex-wrap items-center justify-between gap-3">
           <div className="flex flex-wrap items-center gap-3">
             <label htmlFor="exercise-protocol" className="text-xs font-medium text-slate-700 whitespace-nowrap">
               Protocol
@@ -1269,7 +1669,7 @@ function App() {
             <select
               id="patient-select"
               value={patientId}
-              onChange={(e) => setPatientId(e.target.value)}
+              onChange={(e) => handlePatientChange(e.target.value)}
               className="bg-green-50 border border-green-300 hover:border-emerald-600 text-slate-900 text-xs font-mono rounded-lg px-2.5 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-600 transition-colors"
             >
               {PATIENT_PROFILES.map((p) => (
@@ -1279,7 +1679,27 @@ function App() {
               ))}
             </select>
 
-            <div className="hidden xl:flex items-center gap-2 text-xs text-slate-600 font-mono ml-1">
+            <div className="flex items-center gap-1.5 ml-1">
+              <span className="text-xs font-medium text-slate-700 whitespace-nowrap">Limb</span>
+              <div className="inline-flex rounded-lg border border-green-300 bg-green-100/50 p-0.5 text-xs font-mono">
+                {['Left', 'Right', 'Bilateral'].map((side) => (
+                  <button
+                    key={side}
+                    type="button"
+                    onClick={() => handleLimbSideChange(side)}
+                    className={`px-2 py-1 rounded-md transition-colors whitespace-nowrap ${
+                      limbSide === side
+                        ? 'bg-emerald-700 text-white font-semibold'
+                        : 'text-slate-700 hover:text-slate-950'
+                    }`}
+                  >
+                    {side}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="hidden 2xl:flex items-center gap-2 text-xs text-slate-600 font-mono ml-1">
               <span className="text-emerald-800 font-medium">
                 {activeExercise.tracker === 'hands' ? 'MediaPipe Hands' : 'MediaPipe Pose'}
               </span>
@@ -1325,137 +1745,236 @@ function App() {
         </div>
       </div>
 
-      <main className="p-6 flex-1 max-w-7xl mx-auto w-full">
+      <main className="px-5 py-4 flex-1 max-w-[1440px] mx-auto w-full">
         <div
           className={
             currentView === 'patient'
-              ? 'grid grid-cols-1 lg:grid-cols-12 gap-6 items-start'
+              ? 'space-y-6'
               : 'fixed -left-[9999px] opacity-0 pointer-events-none w-px h-px overflow-hidden'
           }
         >
-          <div className="lg:col-span-6 flex flex-col gap-6">
-            <div className="bg-green-50 p-5 rounded-xl border border-green-200 flex flex-col">
-              <div className="flex justify-between items-center mb-4">
+          {/* Above-the-Fold Single-Screen Workspace: Optical Sensor Viewport + Biomechanical Telemetry & Live Joint Angle Stream */}
+          <section className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch">
+            <div className="lg:col-span-6">
+              <div className="bg-green-50 p-4 rounded-xl border border-green-200 flex flex-col justify-between h-full">
                 <div>
-                  <h2 className="text-base font-semibold text-slate-900 tracking-tight">
-                    Optical Sensor Viewport
-                  </h2>
-                  <p className="text-xs text-slate-600 mt-0.5">
-                    {activeExercise.category || 'Biomechanical Tracking'}
-                  </p>
-                </div>
-                <span className="text-xs font-mono text-emerald-800 font-medium">
-                  {isPaused
-                    ? 'Paused'
-                    : calibrationState.status !== 'calibrated'
-                    ? 'Calibration Mode'
-                    : activeExercise.tracker === 'hands'
-                    ? '21-pt Hand Mesh'
-                    : '33-pt Pose Mesh'}
-                </span>
-              </div>
-
-              <CalibrationWizard
-                tracker={activeExercise.tracker}
-                calibrationState={calibrationState}
-                onSkipCalibration={handleSkipCalibration}
-                onRecalibrate={handleRecalibrate}
-              />
-
-              <div
-                className={`relative bg-slate-900 aspect-video rounded-lg overflow-hidden flex items-center justify-center border transition-colors duration-150 ${
-                  thresholdStatus.severity === 'critical'
-                    ? 'border-rose-500 ring-2 ring-rose-500/50'
-                    : thresholdStatus.severity === 'warning'
-                    ? 'border-amber-500'
-                    : 'border-green-300'
-                }`}
-              >
-                <Webcam
-                  key={webcamKey}
-                  ref={webcamRef}
-                  onUserMedia={handleUserMedia}
-                  onUserMediaError={handleUserMediaError}
-                  className="absolute w-full h-full object-cover transform scale-x-[-1]"
-                />
-                <canvas
-                  ref={canvasRef}
-                  className="absolute w-full h-full object-cover z-10 transform scale-x-[-1]"
-                />
-                {calibrationState.status === 'calibrated' &&
-                  (thresholdStatus.severity === 'critical' ||
-                    thresholdStatus.severity === 'warning') && (
-                    <div
-                      className={`absolute top-3 left-3 right-3 z-20 px-3 py-2 rounded-md border text-xs font-mono flex items-center justify-between gap-2 backdrop-blur-sm pointer-events-none ${
-                        thresholdStatus.severity === 'critical'
-                          ? 'bg-rose-50/95 border-rose-400 text-rose-900'
-                          : 'bg-amber-50/95 border-amber-400 text-amber-900'
-                      }`}
-                    >
-                      <span className="font-semibold">{thresholdStatus.label}</span>
-                      <span className="tabular-nums">
-                        {thresholdStatus.value.toFixed(1)}{safetyLimits.unit} (Limit {safetyLimits.min}–{safetyLimits.max}{safetyLimits.unit})
-                      </span>
+                  <div className="flex justify-between items-center mb-2.5">
+                    <div>
+                      <h2 className="text-base font-semibold text-slate-900 tracking-tight">
+                        Optical Sensor Viewport
+                      </h2>
+                      <p className="text-xs text-slate-600 mt-0.5">
+                        {activeExercise.category || 'Biomechanical Tracking'}
+                      </p>
                     </div>
-                  )}
-                <div className="absolute bottom-3 left-3 z-20 bg-green-50/95 backdrop-blur-sm border border-green-300 px-3 py-1.5 rounded-md text-xs font-mono text-slate-900 pointer-events-none">
+                    <span className="text-xs font-mono text-emerald-800 font-medium">
+                      {isPaused
+                        ? 'Paused'
+                        : calibrationState.status !== 'calibrated'
+                        ? 'Calibration Mode'
+                        : activeExercise.tracker === 'hands'
+                        ? '21-pt Hand Mesh'
+                        : '33-pt Pose Mesh'}
+                    </span>
+                  </div>
+
+                  <CalibrationWizard
+                    tracker={activeExercise.tracker}
+                    calibrationState={calibrationState}
+                    onSelectStep={handleSelectCalibrationStep}
+                    onSkipCalibration={handleSkipCalibration}
+                    onRecalibrate={handleRecalibrate}
+                  />
+                </div>
+
+                <div
+                  className={`relative bg-slate-900 aspect-video max-h-[370px] xl:max-h-[400px] w-full rounded-lg overflow-hidden flex items-center justify-center border transition-colors duration-150 ${
+                    thresholdStatus.severity === 'critical'
+                      ? 'border-rose-500 ring-2 ring-rose-500/50'
+                      : thresholdStatus.severity === 'warning'
+                      ? 'border-amber-500'
+                      : 'border-green-300'
+                  }`}
+                >
+                  <Webcam
+                    key={webcamKey}
+                    ref={webcamRef}
+                    onUserMedia={handleUserMedia}
+                    onUserMediaError={handleUserMediaError}
+                    className="absolute w-full h-full object-cover transform scale-x-[-1]"
+                  />
+                  <canvas
+                    ref={canvasRef}
+                    className="absolute w-full h-full object-cover z-10 transform scale-x-[-1]"
+                  />
+                  {calibrationState.status === 'calibrated' &&
+                    (thresholdStatus.severity === 'critical' ||
+                      thresholdStatus.severity === 'warning') && (
+                      <div
+                        className={`absolute top-3 left-3 right-3 z-20 px-3 py-2 rounded-md border text-xs font-mono flex items-center justify-between gap-2 backdrop-blur-sm pointer-events-none ${
+                          thresholdStatus.severity === 'critical'
+                            ? 'bg-rose-50/95 border-rose-400 text-rose-900'
+                            : 'bg-amber-50/95 border-amber-400 text-amber-900'
+                        }`}
+                      >
+                        <span className="font-semibold">{thresholdStatus.label}</span>
+                        <span className="tabular-nums">
+                          {thresholdStatus.value.toFixed(1)}{safetyLimits.unit} (Limit {safetyLimits.min}–{safetyLimits.max}{safetyLimits.unit})
+                        </span>
+                      </div>
+                    )}
+                  <div className="absolute bottom-2.5 left-2.5 z-20 bg-green-50/95 backdrop-blur-sm border border-green-300 px-2.5 py-1 rounded-md text-xs font-mono text-slate-900 pointer-events-none">
+                    {calibrationState.status !== 'calibrated'
+                      ? activeExercise.tracker === 'hands'
+                        ? `Calibrating Open Palm · ${calibrationState.progressSec.toFixed(1)}s / ${calibrationState.durationSec.toFixed(1)}s`
+                        : `Calibrating T-Pose · ${calibrationState.progressSec.toFixed(1)}s / ${calibrationState.durationSec.toFixed(1)}s`
+                      : activeExercise.tracker === 'hands'
+                      ? `Pinch ${(clinicalMetrics.pinch_distance_mm || 0).toFixed(1)} mm · MCP ${(clinicalMetrics.smoothed_angle || 0).toFixed(1)}°`
+                      : `Angle ${(clinicalMetrics.smoothed_angle || 0).toFixed(1)}° · Reps ${clinicalMetrics.reps || 0}`}
+                  </div>
+                </div>
+
+                <p className="mt-2 text-xs text-slate-600 text-center">
                   {calibrationState.status !== 'calibrated'
                     ? activeExercise.tracker === 'hands'
-                      ? `Calibrating Open Palm · ${calibrationState.progressSec.toFixed(1)}s / ${calibrationState.durationSec.toFixed(1)}s`
-                      : `Calibrating T-Pose · ${calibrationState.progressSec.toFixed(1)}s / ${calibrationState.durationSec.toFixed(1)}s`
+                      ? 'Click steps 1–3 above or hold your open palm steady for 3 seconds to normalize hand coordinates.'
+                      : 'Click steps 1–3 above or hold a horizontal T-pose for 3 seconds to normalize body coordinates.'
                     : activeExercise.tracker === 'hands'
-                    ? `Pinch ${(clinicalMetrics.pinch_distance_mm || 0).toFixed(1)} mm · MCP ${(clinicalMetrics.smoothed_angle || 0).toFixed(1)}°`
-                    : `Angle ${(clinicalMetrics.smoothed_angle || 0).toFixed(1)}° · Reps ${clinicalMetrics.reps || 0}`}
-                </div>
+                    ? 'Hold your hand in clear view of the camera and perform controlled thumb-to-index pinch cycles.'
+                    : 'Position your full body in frame with clear joint visibility for Savitzky-Golay kinematic tracking.'}
+                </p>
               </div>
-
-              <p className="mt-3 text-xs text-slate-600 text-center">
-                {calibrationState.status !== 'calibrated'
-                  ? activeExercise.tracker === 'hands'
-                    ? 'Hold your open palm steady for 3 seconds to normalize hand coordinates.'
-                    : 'Hold a horizontal T-pose for 3 seconds to normalize body coordinates.'
-                  : activeExercise.tracker === 'hands'
-                  ? 'Hold your hand in clear view of the camera and perform controlled thumb-to-index pinch cycles.'
-                  : 'Position your full body in frame with clear joint visibility for Savitzky-Golay kinematic tracking.'}
-              </p>
             </div>
 
-            <ProtocolGuide exercise={activeExercise} />
-          </div>
+            <div className="lg:col-span-6">
+              <ClinicalDashboard
+                metrics={clinicalMetrics}
+                exercise={activeExercise}
+                patientId={patientId}
+                limbSide={limbSide}
+                telemetrySeries={telemetrySeries}
+                telemetryCount={telemetryCount}
+                sessionStartTime={sessionStartTime}
+                targetReps={targetReps}
+                onTargetRepsChange={setTargetReps}
+                clinicalNotes={clinicalNotes}
+                onExportCSV={exportSessionCSV}
+                onReset={saveAndResetSession}
+                safetyLimits={safetyLimits}
+                thresholdMonitoringEnabled={thresholdMonitoringEnabled}
+                breachStats={breachStats}
+                adherenceMetrics={adherenceMetrics}
+                prescription={activePrescription}
+              />
+            </div>
+          </section>
 
-          <div className="lg:col-span-6 flex flex-col gap-6">
-            <ClinicalDashboard
-              metrics={clinicalMetrics}
-              exercise={activeExercise}
-              patientId={patientId}
-              telemetrySeries={telemetrySeries}
-              telemetryCount={telemetryCount}
-              sessionStartTime={sessionStartTime}
-              targetReps={targetReps}
-              onTargetRepsChange={setTargetReps}
-              clinicalNotes={clinicalNotes}
-              onClinicalNotesChange={setClinicalNotes}
-              onExportCSV={exportSessionCSV}
-              onReset={saveAndResetSession}
-              safetyLimits={safetyLimits}
-              thresholdStatus={thresholdStatus}
-              thresholdMonitoringEnabled={thresholdMonitoringEnabled}
-              breachStats={breachStats}
-              audioAlertEnabled={audioAlertEnabled}
-              onToggleAudioAlert={() => setAudioAlertEnabled((prev) => !prev)}
-              onApplySafetyLimits={handleApplySafetyLimits}
-              onSetThresholdMonitoringEnabled={handleSetThresholdMonitoringEnabled}
-              onResetSafetyLimits={handleResetSafetyLimits}
-              onTestAlertTone={() => playThresholdAlertTone('exceeded_max', audioCtxRef)}
-            />
-            <SessionHistory patientId={patientId} refreshTrigger={historyTrigger} />
-          </div>
+          {/* Below-the-Fold Scroll Workspace: Protocol Guidance, Clinical Insights, Prescription Adherence, ROM Safety Monitor & Session Records */}
+          <section className="pt-5 border-t border-green-200">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
+              <div>
+                <h2 className="text-sm font-semibold text-slate-900 tracking-tight">
+                  Protocol Guidance, Fatigue &amp; Symmetry Analytics, Home Prescription &amp; Safety Thresholds
+                </h2>
+                <p className="text-xs text-slate-600 mt-0.5">
+                  Track neuromuscular fatigue drift, compare left vs. right limb recovery, assign home rehab prescriptions, and configure ROM safety corridors.
+                </p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+              <div className="lg:col-span-6 flex flex-col gap-5">
+                <ProtocolGuide exercise={activeExercise} />
+                <ClinicalInsightsPanel
+                  metrics={clinicalMetrics}
+                  exercise={activeExercise}
+                  limbSide={limbSide}
+                  involvedSide={involvedSide}
+                  onInvolvedSideChange={setInvolvedSide}
+                  onLimbSideChange={handleLimbSideChange}
+                  patientSessions={patientSessions}
+                />
+                <SessionHistory
+                  patientId={patientId}
+                  refreshTrigger={historyTrigger}
+                  onHistoryChanged={() => setHistoryTrigger((prev) => prev + 1)}
+                  onSessionsLoaded={setPatientSessions}
+                />
+              </div>
+
+              <div className="lg:col-span-6 flex flex-col gap-5">
+                <ThresholdMonitor
+                  key={activeExercise.key || 'knee_flexion'}
+                  exercise={activeExercise}
+                  safetyLimits={safetyLimits}
+                  thresholdStatus={thresholdStatus}
+                  monitoringEnabled={thresholdMonitoringEnabled}
+                  breachStats={breachStats}
+                  audioAlertEnabled={audioAlertEnabled}
+                  onToggleAudioAlert={() => setAudioAlertEnabled((prev) => !prev)}
+                  onApplySafetyLimits={handleApplySafetyLimits}
+                  onSetMonitoringEnabled={handleSetThresholdMonitoringEnabled}
+                  onResetSafetyLimits={handleResetSafetyLimits}
+                  onTestAlertTone={() => playThresholdAlertTone('exceeded_max', audioCtxRef)}
+                />
+
+                <RehabPrescriptionPanel
+                  key={`${patientId}_${selectedExerciseKey}_${activePrescription.updatedAt || 'default'}`}
+                  exercise={activeExercise}
+                  patientId={patientId}
+                  prescription={activePrescription}
+                  adherenceMetrics={adherenceMetrics}
+                  completedSets={completedSets}
+                  onSavePrescription={handleSavePrescription}
+                  onSyncPrescriptionToThresholds={handleSyncPrescriptionToThresholds}
+                  onCompleteSet={() => setCompletedSets((s) => s + 1)}
+                  onResetSets={() => setCompletedSets(0)}
+                />
+
+                {/* Clinician Session Observations Card */}
+                <div className="bg-green-50 p-5 rounded-xl border border-green-200">
+                  <div className="flex flex-wrap items-center justify-between gap-2 mb-2.5">
+                    <div>
+                      <h3 className="text-base font-semibold text-slate-900 tracking-tight">
+                        Clinician Observations
+                      </h3>
+                      <p className="text-xs text-slate-600 mt-0.5">
+                        Included in exported PDF assessments and saved recovery logs
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={saveAndResetSession}
+                      className="bg-green-300 hover:bg-green-200 text-slate-950 border border-green-400 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0"
+                    >
+                      Save Session &amp; Notes
+                    </button>
+                  </div>
+                  <label htmlFor="clinical-notes" className="sr-only">
+                    Clinician Observations
+                  </label>
+                  <textarea
+                    id="clinical-notes"
+                    rows={3}
+                    value={clinicalNotes}
+                    onChange={(e) => setClinicalNotes(e.target.value)}
+                    placeholder="e.g., Mild pain reported at 90 deg knee flexion; steady cadence; tolerated 10 repetitions without compensatory trunk lean..."
+                    className="w-full bg-green-100/40 border border-green-300 text-slate-900 placeholder:text-slate-500 rounded-lg px-3 py-2 text-xs leading-relaxed focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                  />
+                </div>
+              </div>
+            </div>
+          </section>
         </div>
 
         {currentView === 'doctor' && (
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
             <div className="lg:col-span-8">
-              <DoctorDashboard activeExercise={activeExercise} />
+              <DoctorDashboard
+                activeExercise={activeExercise}
+                refreshTrigger={historyTrigger}
+                onCohortChanged={() => setHistoryTrigger((prev) => prev + 1)}
+              />
             </div>
             <div className="lg:col-span-4">
               <AIChat />

@@ -100,6 +100,46 @@ export function evaluateHandCalibrationPose(landmarks) {
   };
 }
 
+export function extractCalibrationSample(landmarks, tracker) {
+  if (!landmarks || landmarks.length === 0) return null;
+
+  if (tracker === 'hands') {
+    if (landmarks.length < 21) return null;
+    const wrist = landmarks[0];
+    const middleMcp = landmarks[9];
+    if (!wrist || !middleMcp) return null;
+    const palmScale = Math.max(0.05, dist2D(wrist, middleMcp));
+    return {
+      originX: middleMcp.x,
+      originY: middleMcp.y,
+      originZ: middleMcp.z || 0,
+      scale: palmScale,
+      shoulderWidth: palmScale,
+    };
+  }
+
+  if (landmarks.length < 25) return null;
+  const lShoulder = landmarks[11];
+  const rShoulder = landmarks[12];
+  const lHip = landmarks[23];
+  const rHip = landmarks[24];
+  if (!lShoulder || !rShoulder || !lHip || !rHip) return null;
+
+  const shoulderWidth = Math.max(0.05, dist2D(lShoulder, rShoulder));
+  const midShoulderY = (lShoulder.y + rShoulder.y) / 2;
+  const midHipX = (lHip.x + rHip.x) / 2;
+  const midHipY = (lHip.y + rHip.y) / 2;
+  const torsoHeight = Math.max(0.15, Math.abs(midHipY - midShoulderY));
+
+  return {
+    originX: midHipX,
+    originY: midHipY,
+    originZ: ((lHip.z || 0) + (rHip.z || 0)) / 2,
+    scale: torsoHeight,
+    shoulderWidth,
+  };
+}
+
 export function computeNormalizationProfile(samples, tracker) {
   if (!samples || samples.length === 0) return null;
   const n = samples.length;

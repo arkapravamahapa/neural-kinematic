@@ -1,33 +1,47 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { jsPDF } from 'jspdf';
 import KinematicStreamChart from './KinematicStreamChart';
-import ThresholdMonitor from './ThresholdMonitor';
+
+function formatElapsed(sec) {
+  const safe = Math.max(0, Math.floor(sec));
+  const mins = String(Math.floor(safe / 60)).padStart(2, '0');
+  const rem = String(safe % 60).padStart(2, '0');
+  return `${mins}:${rem}`;
+}
 
 function ClinicalDashboard({
   metrics,
   exercise,
   patientId,
+  limbSide = 'Left',
   telemetrySeries,
   telemetryCount,
   sessionStartTime,
   targetReps,
   onTargetRepsChange,
   clinicalNotes,
-  onClinicalNotesChange,
   onExportCSV,
   onReset,
   safetyLimits,
-  thresholdStatus,
   thresholdMonitoringEnabled,
   breachStats,
-  audioAlertEnabled,
-  onToggleAudioAlert,
-  onApplySafetyLimits,
-  onSetThresholdMonitoringEnabled,
-  onResetSafetyLimits,
-  onTestAlertTone,
+  adherenceMetrics,
+  prescription,
 }) {
   const [exportStatus, setExportStatus] = useState('');
+  const [elapsedSec, setElapsedSec] = useState(0);
+
+  useEffect(() => {
+    const updateElapsed = () => {
+      if (!sessionStartTime) {
+        setElapsedSec(0);
+        return;
+      }
+      setElapsedSec(Math.max(0, Math.floor((Date.now() - sessionStartTime) / 1000)));
+    };
+    const timer = setInterval(updateElapsed, 1000);
+    return () => clearInterval(timer);
+  }, [sessionStartTime]);
 
   const isHands = (metrics.tracker || exercise?.tracker) === 'hands';
 
@@ -59,6 +73,8 @@ function ClinicalDashboard({
     Math.round(((metrics.reps || 0) / Math.max(1, targetReps || 10)) * 100)
   );
 
+  const romExcursion = Math.max(0, (metrics.rom_max || 0) - (metrics.rom_min || 0));
+
   const handleExportCSVClick = () => {
     const exportedRows = onExportCSV?.();
     if (exportedRows > 0) {
@@ -73,14 +89,11 @@ function ClinicalDashboard({
     const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
     const nowMs = Date.now();
     const nowStr = new Date(nowMs).toLocaleString();
-    const elapsedSec = sessionStartTime
-      ? Math.max(0, Math.floor((nowMs - sessionStartTime) / 1000))
-      : 0;
-    const elapsedFormatted = `${String(Math.floor(elapsedSec / 60)).padStart(2, '0')}:${String(
-      elapsedSec % 60
-    ).padStart(2, '0')}`;
+    const elapsedFormatted = formatElapsed(
+      sessionStartTime ? Math.max(0, Math.floor((nowMs - sessionStartTime) / 1000)) : 0
+    );
 
-    doc.setFillColor(248, 250, 252);
+    doc.setFillColor(240, 253, 244);
     doc.rect(0, 0, 210, 32, 'F');
     doc.setTextColor(4, 120, 87);
     doc.setFontSize(16);
@@ -125,7 +138,7 @@ function ClinicalDashboard({
       );
     } else {
       doc.text(
-        `Joint ROM: ${(metrics.rom_min || 0).toFixed(1)} deg (Flexion) - ${(metrics.rom_max || 0).toFixed(1)} deg (Extension)`,
+        `Joint ROM: ${(metrics.rom_min || 0).toFixed(1)} deg (Flexion) - ${(metrics.rom_max || 0).toFixed(1)} deg (Extension) | Excursion: ${romExcursion.toFixed(1)} deg`,
         14,
         88
       );
@@ -135,7 +148,7 @@ function ClinicalDashboard({
       metrics.alerts && metrics.alerts.length > 0
         ? metrics.alerts.join(', ')
         : 'None detected during session';
-    doc.text(`Posture Compensations: ${alertsText}`, 14, 96);
+    doc.text(`Limb Side: ${limbSide}   |   Posture Compensations: ${alertsText}`, 14, 96);
     if (safetyLimits) {
       doc.text(
         `Safety Bounds (${safetyLimits.min}-${safetyLimits.max}${safetyLimits.unit} · ${thresholdMonitoringEnabled ? 'Armed' : 'Manual Off'}): Upper Breaches ${breachStats?.upperCount || 0} | Lower Breaches ${breachStats?.lowerCount || 0}`,
@@ -144,17 +157,32 @@ function ClinicalDashboard({
       );
     }
 
+    const fatigueSummary =
+      metrics?.fatigue?.summary || 'Insufficient repetitions for fatigue drift comparison.';
+    doc.text(`Fatigue & Neuromuscular Drift: ${fatigueSummary}`, 14, 110);
+
+    if (adherenceMetrics) {
+      const rxText = prescription
+        ? `${prescription.targetSets}x${prescription.targetReps} reps, Safe ${prescription.safeMin}-${prescription.safeMax}${isHands ? '%' : ' deg'}, Max ${prescription.maxCompensations} comp`
+        : 'Default';
+      doc.text(
+        `Adherence Score: ${adherenceMetrics.adherenceScore}% (Safe-Zone ${adherenceMetrics.safeZonePct}% · Comp ${adherenceMetrics.compensationCount}/${adherenceMetrics.maxCompensations}) | Rx: ${rxText}`,
+        14,
+        117
+      );
+    }
+
     doc.setFontSize(10);
     doc.setTextColor(51, 65, 85);
     doc.text(
       isHands ? 'Live Pinch Aperture Trajectory (%)' : 'Live Joint Angle Trajectory (deg)',
       14,
-      113
+      126
     );
     const boxX = 14;
-    const boxY = 117;
+    const boxY = 130;
     const boxW = 182;
-    const boxH = 50;
+    const boxH = 44;
     doc.setFillColor(248, 250, 252);
     doc.rect(boxX, boxY, boxW, boxH, 'FD');
 
@@ -197,178 +225,199 @@ function ClinicalDashboard({
   };
 
   return (
-    <div className="bg-green-50 p-6 rounded-xl border border-green-200">
-      <div className="flex flex-wrap justify-between items-center gap-3 mb-5 border-b border-green-200 pb-4">
-        <div>
-          <h3 className="text-lg font-semibold text-slate-900 tracking-tight">
-            Biomechanical Telemetry
-          </h3>
-          <p className="text-xs text-slate-600 mt-0.5 font-mono tabular-nums">
-            <span>{exercise?.name || 'Knee Flexion (Squats)'}</span>
-            <span className="mx-1.5 text-green-300" aria-hidden="true">·</span>
-            <span className="text-emerald-800 font-medium">
-              {metrics.status === 'tracking' ? '● Active' : '○ Buffering'}
-            </span>
-            <span className="mx-1.5 text-green-300" aria-hidden="true">·</span>
-            <span>{telemetryCount || telemetrySeries.length} frames</span>
-          </p>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            onClick={handleExportCSVClick}
-            className="bg-green-100/70 hover:bg-green-200/70 text-emerald-900 border border-green-300 px-3 py-2 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600"
-          >
-            Export CSV
-          </button>
-          <button
-            onClick={handleExportPDFClick}
-            className="bg-green-50 hover:bg-green-100 text-slate-800 border border-green-300 px-3 py-2 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600"
-          >
-            Export PDF
-          </button>
-          <button
-            onClick={onReset}
-            className="bg-green-300 hover:bg-green-200 text-slate-950 border border-green-400 px-3.5 py-2 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600"
-          >
-            Save &amp; Clear
-          </button>
-        </div>
-      </div>
-
-      {exportStatus && (
-        <div className="mb-4 bg-green-200/60 border border-green-300 text-emerald-900 px-3.5 py-2 rounded-lg text-xs font-mono">
-          {exportStatus}
-        </div>
-      )}
-
-      {metrics.alerts && metrics.alerts.length > 0 && (
-        <div className="mb-5 bg-amber-50 border border-amber-300 px-4 py-3 rounded-lg flex items-start gap-3">
-          <svg className="h-5 w-5 text-amber-600 shrink-0 mt-0.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-            <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
-          </svg>
-          <div>
-            <p className="text-xs font-semibold text-amber-900">Posture Compensation Detected</p>
-            <p className="text-xs text-amber-800 mt-1 font-mono">
-              {metrics.alerts.join(' · ')}
+    <div className="bg-green-50 p-4 rounded-xl border border-green-200 flex flex-col justify-between h-full">
+      <div>
+        <div className="flex flex-wrap justify-between items-center gap-2.5 mb-3 border-b border-green-200 pb-2.5">
+          <div className="min-w-0">
+            <h3 className="text-base font-semibold text-slate-900 tracking-tight">
+              Biomechanical Telemetry
+            </h3>
+            <p className="text-xs text-slate-600 mt-0.5 font-mono tabular-nums truncate">
+              <span>{exercise?.name || 'Knee Flexion (Squats)'}</span>
+              <span className="mx-1.5 text-green-300" aria-hidden="true">·</span>
+              <span className="text-slate-800 font-medium">{limbSide}</span>
+              <span className="mx-1.5 text-green-300" aria-hidden="true">·</span>
+              <span className="text-emerald-800 font-medium">
+                {metrics.status === 'tracking' ? '● Active' : '○ Buffering'}
+              </span>
+              <span className="mx-1.5 text-green-300" aria-hidden="true">·</span>
+              <span>{formatElapsed(elapsedSec)}</span>
+              <span className="mx-1.5 text-green-300" aria-hidden="true">·</span>
+              <span>{telemetryCount || telemetrySeries.length} frames</span>
             </p>
           </div>
-        </div>
-      )}
 
-      <div className="grid grid-cols-3 gap-4 mb-5">
-        <div className="bg-green-100/55 p-4 rounded-lg border border-green-200">
-          <p className="text-xs font-medium text-slate-600 mb-1">Repetitions</p>
-          <p className="text-3xl font-bold font-mono tabular-nums text-slate-900">
-            {metrics.reps || 0}
-            <span className="text-sm font-normal text-slate-600 ml-1">/ {targetReps}</span>
-          </p>
-          <span className="text-xs text-emerald-800 font-mono mt-1 block">
-            {isHands ? 'Pinch Cycles' : 'Verified Reps'}
-          </span>
-        </div>
-
-        <div className="bg-green-100/55 p-4 rounded-lg border border-green-200">
-          <p className="text-xs font-medium text-slate-600 mb-1">Jerk (RMS)</p>
-          <p className="text-3xl font-bold font-mono tabular-nums text-slate-900">
-            {(metrics.jerk_score || 0).toFixed(1)}
-          </p>
-          <span className={`text-xs font-medium mt-1 block ${smoothnessColor}`}>
-            {smoothnessLabel}
-          </span>
-        </div>
-
-        <div className={`p-4 rounded-lg border ${isInconsistent ? 'bg-rose-50 border-rose-300' : 'bg-green-100/55 border-green-200'}`}>
-          <p className="text-xs font-medium text-slate-600 mb-1">DTW Form Match</p>
-          <p className={`text-3xl font-bold font-mono tabular-nums ${isInconsistent ? 'text-rose-700' : 'text-slate-900'}`}>
-            {dtwScore.toFixed(1)}<span className="text-sm text-slate-600 ml-0.5">%</span>
-          </p>
-          <span className={`text-xs font-medium mt-1 block ${isInconsistent ? 'text-rose-700' : 'text-emerald-800'}`}>
-            {isInconsistent ? 'Form Degrading' : 'Consistent'}
-          </span>
-        </div>
-      </div>
-
-      {/* Repetition Target Progress & Goal Control */}
-      <div className="mb-5 bg-green-100/55 border border-green-200 rounded-lg px-4 py-3">
-        <div className="flex items-center justify-between text-xs mb-2">
-          <span className="text-slate-800 font-medium">
-            Set Target Goal ({repGoalPercent}% complete)
-          </span>
-          <div className="flex items-center gap-1.5 font-mono">
-            {[5, 10, 15, 20].map((goal) => (
-              <button
-                key={goal}
-                type="button"
-                onClick={() => onTargetRepsChange?.(goal)}
-                className={`px-2 py-0.5 rounded text-xs transition-colors ${
-                  targetReps === goal
-                    ? 'bg-green-300 text-slate-950 border border-green-400 font-semibold'
-                    : 'bg-green-50 text-slate-700 hover:text-slate-950 border border-green-200'
-                }`}
-              >
-                {goal}
-              </button>
-            ))}
+          <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+            <button
+              type="button"
+              onClick={handleExportCSVClick}
+              className="bg-green-100/70 hover:bg-green-200/70 text-emerald-900 border border-green-300 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600"
+            >
+              Export CSV
+            </button>
+            <button
+              type="button"
+              onClick={handleExportPDFClick}
+              className="bg-green-50 hover:bg-green-100 text-slate-800 border border-green-300 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600"
+            >
+              Export PDF
+            </button>
+            <button
+              type="button"
+              onClick={onReset}
+              className="bg-green-300 hover:bg-green-200 text-slate-950 border border-green-400 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600"
+            >
+              Save &amp; Clear
+            </button>
           </div>
         </div>
-        <div className="w-full bg-green-50 border border-green-200 rounded-full h-1.5 overflow-hidden">
+
+        {exportStatus && (
+          <div className="mb-2.5 bg-green-200/60 border border-green-300 text-emerald-900 px-3 py-1.5 rounded-lg text-xs font-mono">
+            {exportStatus}
+          </div>
+        )}
+
+        {metrics.fatigue &&
+          (metrics.fatigue.severity === 'critical' || metrics.fatigue.severity === 'warning') && (
+            <div
+              className={`mb-2.5 border px-3 py-1.5 rounded-lg flex items-center justify-between gap-2 text-xs ${
+                metrics.fatigue.severity === 'critical'
+                  ? 'bg-rose-50 border-rose-300 text-rose-900'
+                  : 'bg-amber-50 border-amber-300 text-amber-900'
+              }`}
+            >
+              <span className="font-semibold shrink-0">{metrics.fatigue.label}</span>
+              <span className="font-mono truncate">{metrics.fatigue.summary}</span>
+            </div>
+          )}
+
+        {metrics.alerts && metrics.alerts.length > 0 && (
+          <div className="mb-2.5 bg-amber-50 border border-amber-300 px-3 py-2 rounded-lg flex items-center justify-between gap-2 text-xs">
+            <span className="font-semibold text-amber-900">▲ Posture Compensation</span>
+            <span className="text-amber-800 font-mono truncate">
+              {metrics.alerts.join(' · ')}
+            </span>
+          </div>
+        )}
+
+        {/* 3-Up KPI Strip */}
+        <div className="grid grid-cols-3 gap-2.5 mb-3">
+          <div className="bg-green-100/55 px-3 py-2.5 rounded-lg border border-green-200">
+            <p className="text-[11px] font-medium text-slate-600">Repetitions</p>
+            <p className="text-2xl font-bold font-mono tabular-nums text-slate-900 leading-tight mt-0.5">
+              {metrics.reps || 0}
+              <span className="text-xs font-normal text-slate-600 ml-1">/ {targetReps}</span>
+            </p>
+            <span className="text-[11px] text-emerald-800 font-mono block mt-0.5">
+              {isHands ? 'Pinch Cycles' : 'Verified Reps'}
+            </span>
+          </div>
+
+          <div className="bg-green-100/55 px-3 py-2.5 rounded-lg border border-green-200">
+            <p className="text-[11px] font-medium text-slate-600">Jerk (RMS)</p>
+            <p className="text-2xl font-bold font-mono tabular-nums text-slate-900 leading-tight mt-0.5">
+              {(metrics.jerk_score || 0).toFixed(1)}
+            </p>
+            <span className={`text-[11px] font-medium block mt-0.5 ${smoothnessColor}`}>
+              {smoothnessLabel}
+            </span>
+          </div>
+
           <div
-            className="bg-emerald-600 h-full rounded-full transition-all duration-150"
-            style={{ width: `${repGoalPercent}%` }}
+            className={`px-3 py-2.5 rounded-lg border ${
+              isInconsistent ? 'bg-rose-50 border-rose-300' : 'bg-green-100/55 border-green-200'
+            }`}
+          >
+            <p className="text-[11px] font-medium text-slate-600">DTW Form Match</p>
+            <p
+              className={`text-2xl font-bold font-mono tabular-nums leading-tight mt-0.5 ${
+                isInconsistent ? 'text-rose-700' : 'text-slate-900'
+              }`}
+            >
+              {dtwScore.toFixed(1)}
+              <span className="text-xs text-slate-600 ml-0.5">%</span>
+            </p>
+            <span
+              className={`text-[11px] font-medium block mt-0.5 ${
+                isInconsistent ? 'text-rose-700' : 'text-emerald-800'
+              }`}
+            >
+              {isInconsistent ? 'Form Degrading' : 'Consistent'}
+            </span>
+          </div>
+        </div>
+
+        {/* Repetition Target Goal Bar */}
+        <div className="mb-3 bg-green-100/55 border border-green-200 rounded-lg px-3 py-2">
+          <div className="flex items-center justify-between text-xs mb-1.5">
+            <span className="text-slate-800 font-medium">
+              Set Target Goal ({repGoalPercent}% complete)
+            </span>
+            <div className="flex items-center gap-1 font-mono">
+              {[5, 10, 15, 20].map((goal) => (
+                <button
+                  key={goal}
+                  type="button"
+                  onClick={() => onTargetRepsChange?.(goal)}
+                  className={`px-2 py-0.5 rounded text-xs transition-colors ${
+                    targetReps === goal
+                      ? 'bg-green-300 text-slate-950 border border-green-400 font-semibold'
+                      : 'bg-green-50 text-slate-700 hover:text-slate-950 border border-green-200'
+                  }`}
+                >
+                  {goal}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="w-full bg-green-50 border border-green-200 rounded-full h-1.5 overflow-hidden">
+            <div
+              className="bg-emerald-600 h-full rounded-full transition-all duration-150"
+              style={{ width: `${repGoalPercent}%` }}
+            />
+          </div>
+        </div>
+
+        {/* Real-time Recharts Live Joint Angle / Pinch Stream (Above the Fold) */}
+        <div className="mb-3">
+          <div className="flex items-center justify-between text-xs mb-1.5">
+            <span className="font-semibold text-slate-800">
+              {isHands ? 'Live Pinch Aperture & MCP Stream' : 'Live Joint Angle Stream'}
+            </span>
+            <span className="font-mono tabular-nums text-slate-600">
+              {isHands ? (
+                <>
+                  <span className="text-emerald-800 font-medium">
+                    Pinch {(metrics.pinch_distance_mm || 0).toFixed(1)} mm
+                  </span>
+                  <span className="mx-1.5 text-green-300">·</span>
+                  <span className="text-amber-700 font-medium">
+                    MCP {(metrics.smoothed_angle || 0).toFixed(1)}°
+                  </span>
+                </>
+              ) : (
+                <span className="text-emerald-800 font-medium">
+                  Savitzky-Golay {(metrics.smoothed_angle || 0).toFixed(1)}°
+                </span>
+              )}
+            </span>
+          </div>
+          <KinematicStreamChart
+            telemetrySeries={telemetrySeries}
+            exercise={exercise}
+            isHands={isHands}
+            safetyLimits={safetyLimits}
+            monitoringEnabled={thresholdMonitoringEnabled}
+            heightClass="h-40"
           />
         </div>
       </div>
 
-      {/* ROM Safety Threshold Monitoring Panel */}
-      {safetyLimits && (
-        <ThresholdMonitor
-          key={exercise?.key || 'knee_flexion'}
-          exercise={exercise}
-          safetyLimits={safetyLimits}
-          thresholdStatus={thresholdStatus}
-          monitoringEnabled={thresholdMonitoringEnabled}
-          breachStats={breachStats}
-          audioAlertEnabled={audioAlertEnabled}
-          onToggleAudioAlert={onToggleAudioAlert}
-          onApplySafetyLimits={onApplySafetyLimits}
-          onSetMonitoringEnabled={onSetThresholdMonitoringEnabled}
-          onResetSafetyLimits={onResetSafetyLimits}
-          onTestAlertTone={onTestAlertTone}
-        />
-      )}
-
-      {/* Real-time Recharts Kinematic Stream Plot */}
-      <div className="mb-5">
-        <div className="flex items-center justify-between text-xs mb-2">
-          <span className="font-medium text-slate-800">
-            {isHands ? 'Live Pinch Aperture & MCP Stream' : 'Live Joint Angle Stream'}
-          </span>
-          <span className="font-mono tabular-nums text-slate-600">
-            {isHands ? (
-              <>
-                <span className="text-emerald-800 font-medium">Pinch {(metrics.pinch_distance_mm || 0).toFixed(1)} mm</span>
-                <span className="mx-1.5 text-green-300">·</span>
-                <span className="text-amber-700 font-medium">MCP {(metrics.smoothed_angle || 0).toFixed(1)}°</span>
-              </>
-            ) : (
-              <span className="text-emerald-800 font-medium">Savitzky-Golay {(metrics.smoothed_angle || 0).toFixed(1)}°</span>
-            )}
-          </span>
-        </div>
-        <KinematicStreamChart
-          telemetrySeries={telemetrySeries}
-          exercise={exercise}
-          isHands={isHands}
-          safetyLimits={safetyLimits}
-          monitoringEnabled={thresholdMonitoringEnabled}
-        />
-      </div>
-
-      {/* Articulation Range Bar */}
-      <div className="space-y-3">
+      {/* Articulation Range Bar & Live ROM Summary */}
+      <div className="space-y-2 pt-2 border-t border-green-200">
         <div>
-          <div className="flex justify-between text-xs mb-1.5">
+          <div className="flex justify-between text-xs mb-1">
             <span className="font-medium text-slate-800">
               {isHands ? 'Thumb–Index Pinch Aperture' : 'Smoothed Articulation Angle'}
             </span>
@@ -386,41 +435,60 @@ function ClinicalDashboard({
           </div>
         </div>
 
-        <div className="flex flex-wrap justify-between gap-2 text-xs pt-3 border-t border-green-200 font-mono tabular-nums">
+        <div className="flex flex-wrap justify-between gap-2 text-xs font-mono tabular-nums">
           {isHands ? (
             <>
               <span className="text-slate-700">
-                Min Pinch Span: <span className="font-semibold text-emerald-800">{(metrics.pinch_min_mm || 0).toFixed(1)} mm</span>
+                Min Pinch Span:{' '}
+                <span className="font-semibold text-emerald-800">
+                  {(metrics.pinch_min_mm || 0).toFixed(1)} mm
+                </span>
               </span>
               <span className="text-slate-700">
-                MCP ROM Range: <span className="font-semibold text-slate-900">{(metrics.rom_min || 0).toFixed(1)}° – {(metrics.rom_max || 0).toFixed(1)}°</span>
+                MCP ROM:{' '}
+                <span className="font-semibold text-slate-900">
+                  {(metrics.rom_min || 0).toFixed(1)}° – {(metrics.rom_max || 0).toFixed(1)}°
+                </span>
               </span>
             </>
           ) : (
             <>
               <span className="text-slate-700">
-                Max Extension: <span className="font-semibold text-emerald-800">{(metrics.rom_max || 0).toFixed(1)}°</span>
+                Max Extension:{' '}
+                <span className="font-semibold text-emerald-800">
+                  {(metrics.rom_max || 0).toFixed(1)}°
+                </span>
               </span>
               <span className="text-slate-700">
-                Max Flexion: <span className="font-semibold text-green-800">{(metrics.rom_min || 0).toFixed(1)}°</span>
+                Max Flexion:{' '}
+                <span className="font-semibold text-green-800">
+                  {(metrics.rom_min || 0).toFixed(1)}°
+                </span>
+              </span>
+              <span className="text-slate-700">
+                Excursion:{' '}
+                <span className="font-semibold text-slate-900">
+                  {romExcursion.toFixed(1)}°
+                </span>
               </span>
             </>
           )}
-        </div>
-
-        {/* Clinician Session Notes */}
-        <div className="pt-2">
-          <label htmlFor="clinical-notes" className="block text-xs font-medium text-slate-700 mb-1.5">
-            Clinician Observations (Included in PDF &amp; Saved Record)
-          </label>
-          <input
-            id="clinical-notes"
-            type="text"
-            value={clinicalNotes || ''}
-            onChange={(e) => onClinicalNotesChange?.(e.target.value)}
-            placeholder="e.g., Mild pain reported at 90 deg knee flexion; steady cadence..."
-            className="w-full bg-green-50 border border-green-300 text-slate-900 placeholder:text-slate-500 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-emerald-600"
-          />
+          {adherenceMetrics && adherenceMetrics.status === 'active' && (
+            <span className="text-slate-700">
+              Safe-Zone:{' '}
+              <span
+                className={`font-semibold ${
+                  adherenceMetrics.tone === 'critical'
+                    ? 'text-rose-700'
+                    : adherenceMetrics.tone === 'warning'
+                    ? 'text-amber-700'
+                    : 'text-emerald-800'
+                }`}
+              >
+                {adherenceMetrics.safeZonePct}%
+              </span>
+            </span>
+          )}
         </div>
       </div>
     </div>

@@ -108,7 +108,7 @@ function ThresholdMonitor({
     ? 'bg-rose-50 border-rose-300'
     : isWarning
     ? 'bg-amber-50 border-amber-300'
-    : 'bg-green-100/55 border-green-200';
+    : 'bg-green-50 border-green-200';
 
   const statusTextColor = isCritical
     ? 'text-rose-700 font-semibold'
@@ -184,7 +184,7 @@ function ThresholdMonitor({
   };
 
   return (
-    <div className={`mb-5 rounded-lg border p-4 transition-colors duration-150 ${containerStyle}`}>
+    <div className={`rounded-xl border p-5 transition-colors duration-150 ${containerStyle}`}>
       {/* Header Row */}
       <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
         <div>

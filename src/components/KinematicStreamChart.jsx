@@ -58,6 +58,7 @@ function KinematicStreamChart({
   isHands,
   safetyLimits,
   monitoringEnabled = false,
+  heightClass = 'h-48',
 }) {
   const startTs = telemetrySeries.length > 0 ? telemetrySeries[0].time : 0;
 
@@ -72,7 +73,7 @@ function KinematicStreamChart({
 
   if (chartData.length === 0) {
     return (
-      <div className="w-full h-48 rounded-lg border border-green-200 bg-green-100/50 flex items-center justify-center">
+      <div className={`w-full ${heightClass} rounded-lg border border-green-200 bg-green-100/50 flex items-center justify-center`}>
         <span className="text-xs font-mono text-slate-600">
           Awaiting live kinematic stream...
         </span>
@@ -81,7 +82,7 @@ function KinematicStreamChart({
   }
 
   return (
-    <div className="w-full h-48 min-w-0 rounded-lg border border-green-200 bg-green-100/40 pt-3 pr-2 pb-1 pl-0">
+    <div className={`w-full ${heightClass} min-w-0 rounded-lg border border-green-200 bg-green-100/40 pt-3 pr-2 pb-1 pl-0`}>
       <ResponsiveContainer width="100%" height="100%">
         <ComposedChart data={chartData} margin={{ top: 6, right: 10, left: -12, bottom: 0 }}>
           <defs>
