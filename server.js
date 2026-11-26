@@ -33,6 +33,29 @@ const ai = GEMINI_API_KEY
   : null;
 
 const app = express();
+const allowedLocalOrigins = new Set([
+  'http://localhost:3001',
+  'http://localhost:5173',
+  'http://127.0.0.1:3001',
+  'http://127.0.0.1:5173',
+  'http://[::1]:3001',
+  'http://[::1]:5173',
+]);
+
+app.use((req, res, next) => {
+  const origin = req.get('Origin');
+  if (origin && allowedLocalOrigins.has(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.setHeader('Access-Control-Max-Age', '86400');
+  }
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(origin && !allowedLocalOrigins.has(origin) ? 403 : 204);
+  }
+  next();
+});
 app.use(express.json());
 
 app.get('/api/health', (_req, res) => {
@@ -198,7 +221,8 @@ Doctor's Query: ${message}
 });
 
 const httpServer = createServer(app);
-const wss = new WebSocketServer({ server: httpServer, path: '/ws/movement' });
+const wsServer = createServer();
+const wss = new WebSocketServer({ server: wsServer });
 
 let activeExerciseKey = 'knee_flexion';
 const analyzer = new PatientSessionAnalyzer(EXERCISE_CONFIG[activeExerciseKey]);
@@ -321,8 +345,12 @@ async function startServer() {
   }
 
   const PORT = Number(process.env.PORT || 3000);
+  const WS_PORT = Number(process.env.WS_PORT || 24678);
   httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`Neural-Kinematic server running on http://0.0.0.0:${PORT}`);
+  });
+  wsServer.listen(WS_PORT, '0.0.0.0', () => {
+    console.log(`Neural-Kinematic WebSocket listening on ws://0.0.0.0:${WS_PORT}`);
   });
 }
 

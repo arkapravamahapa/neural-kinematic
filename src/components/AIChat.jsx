@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { getApiUrl } from '../utils/backend';
 
 const INITIAL_MESSAGE = {
   sender: 'ai',
@@ -31,7 +32,7 @@ function AIChat() {
     setIsSending(true);
 
     try {
-      const response = await fetch('/api/chat', {
+      const response = await fetch(getApiUrl('/api/chat'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: userMsg.text }),

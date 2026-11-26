@@ -11,6 +11,7 @@ import {
   Tooltip,
 } from 'recharts';
 import { computeLimbAsymmetry } from '../utils/clinicalAnalytics';
+import { getApiUrl, getWebSocketUrl } from '../utils/backend';
 
 const POSE_CONNECTIONS = [
   [11, 13], [13, 15], [12, 14], [14, 16],
@@ -95,7 +96,7 @@ function DoctorDashboard({ activeExercise, refreshTrigger, onCohortChanged }) {
 
   const fetchPopulation = useCallback(async () => {
     try {
-      const response = await fetch('/api/population');
+      const response = await fetch(getApiUrl('/api/population'));
       const data = await response.json();
       if (Array.isArray(data)) setPopulationData(data);
     } catch (error) {
@@ -348,26 +349,41 @@ function DoctorDashboard({ activeExercise, refreshTrigger, onCohortChanged }) {
   }, []);
 
   useEffect(() => {
-    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws/movement`);
+    let isMounted = true;
+    let reconnectTimer = null;
+    let ws;
 
-    ws.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (data.type === 'exercise_changed' && data.config?.tracker) {
-          setWsTracker(data.config.tracker);
-        } else if (data.type === 'clinical_telemetry' && data.raw_skeleton) {
-          const trackerMode = data.tracker || data.metrics?.tracker || 'pose';
-          setWsTracker(trackerMode);
-          if (data.metrics) setLiveMetrics(data.metrics);
-          update3DSkeleton(data.raw_skeleton, trackerMode);
+    const connect = () => {
+      if (!isMounted) return;
+      ws = new WebSocket(getWebSocketUrl());
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === 'exercise_changed' && data.config?.tracker) {
+            setWsTracker(data.config.tracker);
+          } else if (data.type === 'clinical_telemetry' && data.raw_skeleton) {
+            const trackerMode = data.tracker || data.metrics?.tracker || 'pose';
+            setWsTracker(trackerMode);
+            if (data.metrics) setLiveMetrics(data.metrics);
+            update3DSkeleton(data.raw_skeleton, trackerMode);
+          }
+        } catch (e) {
+          console.error(e);
         }
-      } catch (e) {
-        console.error(e);
-      }
+      };
+
+      ws.onclose = () => {
+        if (isMounted) reconnectTimer = setTimeout(connect, 1500);
+      };
     };
 
-    return () => ws.close();
+    connect();
+    return () => {
+      isMounted = false;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (ws) ws.close();
+    };
   }, [update3DSkeleton]);
 
   const uniquePatients = Array.from(new Set(populationData.map((s) => s.patient_id)));
@@ -452,7 +468,7 @@ function DoctorDashboard({ activeExercise, refreshTrigger, onCohortChanged }) {
 
   const handleDeleteRecord = async (sessionId) => {
     try {
-      const res = await fetch(`/api/history/${sessionId}`, { method: 'DELETE' });
+      const res = await fetch(getApiUrl(`/api/history/${sessionId}`), { method: 'DELETE' });
       if (res.ok) {
         setPopulationData((prev) => prev.filter((item) => item.id !== sessionId));
         onCohortChanged?.();

@@ -17,6 +17,7 @@ import StreamStatusIndicator from './components/StreamStatusIndicator';
 import ThresholdMonitor from './components/ThresholdMonitor';
 import ClinicalInsightsPanel from './components/ClinicalInsightsPanel';
 import RehabPrescriptionPanel from './components/RehabPrescriptionPanel';
+import { PatientSessionAnalyzer } from '../server/kinematics.js';
 import {
   evaluateTPose,
   evaluateHandCalibrationPose,
@@ -35,8 +36,11 @@ import {
   formatPrescriptionSummary,
   computeAdherenceMetrics,
 } from './utils/clinicalAnalytics';
+import { getApiUrl, getWebSocketUrl } from './utils/backend';
 
 const CALIBRATION_DURATION_SEC = 3.0;
+const MAX_WEBSOCKET_BUFFER_BYTES = 256 * 1024;
+const WEBSOCKET_STALE_AFTER_MS = 1500;
 
 function createInitialCalibrationState(tracker) {
   const isHands = tracker === 'hands';
@@ -61,10 +65,13 @@ const DEFAULT_EXERCISES = {
     tracker: 'pose',
     primary_angle_joints: [23, 25, 27],
     joint_labels: ['Hip (23)', 'Knee (25)', 'Ankle (27)'],
+    rep_direction: 'decrease',
     rom_target_min: 70,
     rom_target_max: 170,
     safety_min: 55,
     safety_max: 176,
+    rep_trigger_prominence: 45,
+    min_rep_duration_sec: 0.35,
     guidance: {
       framing:
         'Stand 2–2.5 m from the camera at a slight 30° angle so hip, knee, and ankle stay visible.',
@@ -87,10 +94,13 @@ const DEFAULT_EXERCISES = {
     tracker: 'pose',
     primary_angle_joints: [11, 13, 15],
     joint_labels: ['Shoulder (11)', 'Elbow (13)', 'Wrist (15)'],
+    rep_direction: 'decrease',
     rom_target_min: 35,
     rom_target_max: 165,
     safety_min: 25,
     safety_max: 175,
+    rep_trigger_prominence: 45,
+    min_rep_duration_sec: 0.3,
     guidance: {
       framing:
         'Face the camera 1.5–2 m back with your upper torso, left shoulder, elbow, and wrist clearly framed.',
@@ -113,10 +123,13 @@ const DEFAULT_EXERCISES = {
     tracker: 'pose',
     primary_angle_joints: [12, 11, 13],
     joint_labels: ['R.Shoulder (12)', 'L.Shoulder (11)', 'L.Elbow (13)'],
+    rep_direction: 'increase',
     rom_target_min: 95,
     rom_target_max: 175,
     safety_min: 80,
     safety_max: 178,
+    rep_trigger_prominence: 35,
+    min_rep_duration_sec: 0.35,
     guidance: {
       framing:
         'Stand straight facing the camera 1.5–2 m away so both shoulders and extended arms fit inside the frame.',
@@ -140,10 +153,13 @@ const DEFAULT_EXERCISES = {
     primary_angle_joints: [0, 5, 6],
     pinch_landmarks: [4, 8],
     joint_labels: ['Thumb Tip (4)', 'Index Tip (8)', 'Index MCP (5)'],
+    rep_direction: 'decrease',
     rom_target_min: 10,
     rom_target_max: 90,
     safety_min: 5,
     safety_max: 105,
+    rep_trigger_prominence: 25,
+    min_rep_duration_sec: 0.2,
     guidance: {
       framing:
         'Position one hand 35–55 cm in front of the camera with good lighting and an uncluttered background.',
@@ -209,6 +225,13 @@ function App() {
   const loadingTrackerRef = useRef(null);
   const requestRef = useRef(null);
   const wsRef = useRef(null);
+  const fallbackAnalyzerRef = useRef(
+    new PatientSessionAnalyzer(DEFAULT_EXERCISES.knee_flexion)
+  );
+  const wsTelemetryStatusRef = useRef(null);
+  const lastWsTelemetryAtRef = useRef(0);
+  const highestRepCountRef = useRef(0);
+  const lastStreamPushAtRef = useRef(0);
 
   const sessionLogRef = useRef([]);
 
@@ -388,6 +411,135 @@ function App() {
     }
   }, []);
 
+  // Unified telemetry ingestion so BOTH WebSocket frames AND local fallback frames feed the live kinematic stream chart
+  const ingestTelemetryMetrics = useCallback(
+    (rawMetrics, source = 'ws') => {
+      if (!rawMetrics) return;
+
+      const reps = Math.max(
+        Number(rawMetrics.reps || 0),
+        fallbackAnalyzerRef.current.repCount || 0,
+        highestRepCountRef.current
+      );
+      highestRepCountRef.current = reps;
+      const metrics = { ...rawMetrics, reps };
+      setClinicalMetrics(metrics);
+
+      const activeLimits = safetyLimitsRef.current;
+      const isHands = (metrics.tracker || activeExerciseRef.current.tracker) === 'hands';
+      const sigVal = isHands
+        ? Number(metrics.pinch_aperture || 0)
+        : Number(metrics.smoothed_angle || 0);
+      const evalThreshold = evaluateRomThreshold(
+        sigVal,
+        activeLimits,
+        metrics.status,
+        thresholdMonitoringEnabledRef.current
+      );
+
+      // Push stream points whenever tracking OR buffering with valid signal so Live Kinematic Stream never stalls
+      const hasLiveSignal =
+        metrics.status === 'tracking' ||
+        (metrics.status === 'buffering' &&
+          (sigVal > 0 || Number(metrics.pinch_distance_mm || 0) > 0));
+
+      const nowPerf = performance.now();
+      if (hasLiveSignal && nowPerf - lastStreamPushAtRef.current >= 30) {
+        lastStreamPushAtRef.current = nowPerf;
+        const nowMs = Date.now();
+        const rx = activePrescriptionRef.current;
+        const safeZoneOk =
+          sigVal >= rx.safeMin &&
+          sigVal <= rx.safeMax &&
+          (!metrics.alerts || metrics.alerts.length === 0);
+
+        setAdherenceCounters((prev) => ({
+          totalFrames: prev.totalFrames + 1,
+          safeZoneFrames: prev.safeZoneFrames + (safeZoneOk ? 1 : 0),
+        }));
+
+        const point = {
+          time: nowMs,
+          source,
+          protocol: selectedExerciseKeyRef.current,
+          limbSide: limbSideRef.current,
+          angle: Number(metrics.smoothed_angle || 0),
+          smoothed_angle: Number(metrics.smoothed_angle || 0),
+          pinchAperture: Number(metrics.pinch_aperture || 0),
+          pinch_aperture: Number(metrics.pinch_aperture || 0),
+          pinchMm: Number(metrics.pinch_distance_mm || 0),
+          reps: metrics.reps,
+          jerk: Number(metrics.jerk_score || 0),
+          dtw: Number(metrics.dtw_consistency ?? 100),
+          thresholdState: evalThreshold.state,
+          safeZoneOk,
+          fatigueSummary: metrics.fatigue?.summary || '',
+          alerts: (metrics.alerts || []).join(' | '),
+        };
+
+        sessionLogRef.current.push(point);
+        setTelemetryCount(sessionLogRef.current.length);
+        setTelemetrySeries((prev) => {
+          const next = [...prev, point];
+          return next.length > 100 ? next.slice(-100) : next;
+        });
+
+        if (metrics.status === 'tracking' && evalThreshold.severity === 'critical') {
+          if (lastBreachStateRef.current !== evalThreshold.state) {
+            const timeLabel = new Date(nowMs).toLocaleTimeString([], {
+              hour12: false,
+            });
+            setBreachStats((prev) => ({
+              upperCount:
+                prev.upperCount + (evalThreshold.state === 'exceeded_max' ? 1 : 0),
+              lowerCount:
+                prev.lowerCount + (evalThreshold.state === 'below_min' ? 1 : 0),
+              lastEvent: `${evalThreshold.label} (${evalThreshold.value}${activeLimits.unit} @ ${timeLabel})`,
+            }));
+            speakFeedback(
+              evalThreshold.state === 'exceeded_max'
+                ? 'Caution. Range of motion exceeded maximum safety limit.'
+                : 'Caution. Range of motion fell below minimum safety limit.'
+            );
+          }
+
+          if (
+            audioAlertEnabledRef.current &&
+            nowMs - lastToneTimeRef.current >= 1200
+          ) {
+            playThresholdAlertTone(evalThreshold.state, audioCtxRef);
+            lastToneTimeRef.current = nowMs;
+          }
+        }
+        if (metrics.status === 'tracking') {
+          lastBreachStateRef.current = evalThreshold.state;
+        }
+      }
+
+      if (
+        reps > 0 &&
+        reps >= targetRepsRef.current &&
+        !targetGoalSpokenRef.current
+      ) {
+        targetGoalSpokenRef.current = true;
+        speakFeedback(`Target of ${targetRepsRef.current} repetitions reached.`);
+      } else if (reps > 0 && reps % 5 === 0) {
+        speakFeedback(`${reps} repetitions completed.`);
+      }
+
+      if (metrics.alerts && metrics.alerts.length > 0) {
+        const currentAlert = metrics.alerts[0];
+        if (currentAlert !== lastAlertSpoken.current) {
+          speakFeedback(`Warning: ${currentAlert}`);
+          lastAlertSpoken.current = currentAlert;
+        }
+      } else {
+        lastAlertSpoken.current = '';
+      }
+    },
+    [speakFeedback]
+  );
+
   const syncCalibrationUi = useCallback((next, force = false) => {
     const now = performance.now();
     const ref = calibrationRef.current;
@@ -497,6 +649,9 @@ function App() {
         true
       );
       speakFeedback('Calibration complete. Begin exercise.');
+      fallbackAnalyzerRef.current.reset();
+      highestRepCountRef.current = 0;
+      lastStreamPushAtRef.current = 0;
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
         wsRef.current.send(JSON.stringify({ type: 'reset_session' }));
       }
@@ -508,7 +663,7 @@ function App() {
   useEffect(() => {
     const fetchExercises = async () => {
       try {
-        const res = await fetch('/api/exercises');
+        const res = await fetch(getApiUrl('/api/exercises'));
         if (res.ok) {
           const data = await res.json();
           if (data && Object.keys(data).length > 0) {
@@ -526,7 +681,9 @@ function App() {
     let cancelled = false;
     const loadPrescriptions = async () => {
       try {
-        const res = await fetch(`/api/prescriptions/${encodeURIComponent(patientId)}`);
+        const res = await fetch(
+          getApiUrl(`/api/prescriptions/${encodeURIComponent(patientId)}`)
+        );
         if (res.ok) {
           const data = await res.json();
           if (!cancelled && data && typeof data === 'object') {
@@ -753,6 +910,10 @@ function App() {
 
     const nextRx = prescriptionsByKey[nextKey] || getDefaultPrescription(nextConfig);
     setSelectedExerciseKey(nextKey);
+    fallbackAnalyzerRef.current.setConfig(nextConfig);
+    fallbackAnalyzerRef.current.setSide(limbSideRef.current);
+    highestRepCountRef.current = 0;
+    lastStreamPushAtRef.current = 0;
     setTargetReps(nextRx.targetReps || 10);
     setCompletedSets(0);
     setClinicalMetrics({
@@ -771,6 +932,8 @@ function App() {
     sessionLogRef.current = [];
     lastAlertSpoken.current = '';
     targetGoalSpokenRef.current = false;
+    wsTelemetryStatusRef.current = null;
+    lastWsTelemetryAtRef.current = 0;
     startCalibration(nextConfig.tracker);
 
     ensureTrackerLoaded(nextConfig.tracker);
@@ -788,6 +951,10 @@ function App() {
   };
 
   const resetCurrentTelemetry = () => {
+    fallbackAnalyzerRef.current.setConfig(activeExerciseRef.current);
+    fallbackAnalyzerRef.current.setSide(limbSideRef.current);
+    highestRepCountRef.current = 0;
+    lastStreamPushAtRef.current = 0;
     setClinicalMetrics({
       ...INITIAL_METRICS,
       tracker: activeExercise.tracker,
@@ -802,6 +969,8 @@ function App() {
     sessionLogRef.current = [];
     lastAlertSpoken.current = '';
     targetGoalSpokenRef.current = false;
+    wsTelemetryStatusRef.current = null;
+    lastWsTelemetryAtRef.current = 0;
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: 'reset_session' }));
     }
@@ -811,6 +980,9 @@ function App() {
     if (!['Left', 'Right', 'Bilateral'].includes(nextSide)) return;
     setLimbSide(nextSide);
     limbSideRef.current = nextSide;
+    fallbackAnalyzerRef.current.setSide(nextSide);
+    highestRepCountRef.current = 0;
+    lastStreamPushAtRef.current = 0;
     setClinicalMetrics({
       ...INITIAL_METRICS,
       tracker: activeExercise.tracker,
@@ -825,6 +997,8 @@ function App() {
     sessionLogRef.current = [];
     lastAlertSpoken.current = '';
     targetGoalSpokenRef.current = false;
+    wsTelemetryStatusRef.current = null;
+    lastWsTelemetryAtRef.current = 0;
 
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(
@@ -844,7 +1018,7 @@ function App() {
 
   const handleSavePrescription = async (nextRx) => {
     try {
-      const res = await fetch('/api/prescriptions', {
+      const res = await fetch(getApiUrl('/api/prescriptions'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1126,7 +1300,7 @@ function App() {
     const rxSummary = formatPrescriptionSummary(activePrescription, isHands ? '%' : '°');
 
     try {
-      await fetch('/api/save_session', {
+      await fetch(getApiUrl('/api/save_session'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1159,6 +1333,46 @@ function App() {
     setClinicalNotes('');
     resetCurrentTelemetry();
   };
+
+  const processLocalFrame = useCallback(
+    (landmarks, tracker, exercise, exerciseKey, timestampMs) => {
+      const profile = calibrationRef.current.profile;
+      const outboundLandmarks =
+        profile && !profile.skipped ? normalizeLandmarks(landmarks, profile) : landmarks;
+      const localMetrics = fallbackAnalyzerRef.current.processFrame(
+        outboundLandmarks,
+        timestampMs / 1000
+      );
+      const ws = wsRef.current;
+      const canSend =
+        ws &&
+        ws.readyState === WebSocket.OPEN &&
+        ws.bufferedAmount <= MAX_WEBSOCKET_BUFFER_BYTES;
+
+      if (canSend) {
+        ws.send(
+          JSON.stringify({
+            type: 'skeleton_telemetry',
+            tracker,
+            exercise_key: exerciseKey,
+            exercise_id: exercise.id,
+            limb_side: limbSideRef.current,
+            landmarks: outboundLandmarks,
+          })
+        );
+      }
+
+      const useLocalMetrics =
+        !canSend ||
+        wsTelemetryStatusRef.current === 'buffering' ||
+        performance.now() - lastWsTelemetryAtRef.current > WEBSOCKET_STALE_AFTER_MS;
+
+      if (useLocalMetrics) {
+        ingestTelemetryMetrics(localMetrics, 'local');
+      }
+    },
+    [ingestTelemetryMetrics]
+  );
 
   const detectMovement = useCallback(
     function detectMovement() {
@@ -1296,20 +1510,8 @@ function App() {
               }
 
               const calibrated = runCalibrationCheck(landmarks);
-              if (calibrated && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                const prof = calibrationRef.current.profile;
-                const outboundLandmarks =
-                  prof && !prof.skipped ? normalizeLandmarks(landmarks, prof) : landmarks;
-                wsRef.current.send(
-                  JSON.stringify({
-                    type: 'skeleton_telemetry',
-                    tracker: 'hands',
-                    exercise_key: exKey,
-                    exercise_id: exercise.id,
-                    limb_side: limbSideRef.current,
-                    landmarks: outboundLandmarks,
-                  })
-                );
+              if (calibrated) {
+                processLocalFrame(landmarks, 'hands', exercise, exKey, startTimeMs);
               }
             } else if (
               calibrationRef.current.status !== 'calibrated' &&
@@ -1377,20 +1579,8 @@ function App() {
               }
 
               const calibrated = runCalibrationCheck(landmarks);
-              if (calibrated && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                const prof = calibrationRef.current.profile;
-                const outboundLandmarks =
-                  prof && !prof.skipped ? normalizeLandmarks(landmarks, prof) : landmarks;
-                wsRef.current.send(
-                  JSON.stringify({
-                    type: 'skeleton_telemetry',
-                    tracker: 'pose',
-                    exercise_key: exKey,
-                    exercise_id: exercise.id,
-                    limb_side: limbSideRef.current,
-                    landmarks: outboundLandmarks,
-                  })
-                );
+              if (calibrated) {
+                processLocalFrame(landmarks, 'pose', exercise, exKey, startTimeMs);
               }
             } else if (
               calibrationRef.current.status !== 'calibrated' &&
@@ -1413,31 +1603,44 @@ function App() {
 
       requestRef.current = requestAnimationFrame(detectMovement);
     },
-    [finalizeCalibration, syncCalibrationUi]
+    [finalizeCalibration, processLocalFrame, syncCalibrationUi]
   );
 
   useEffect(() => {
     let isMounted = true;
     let reconnectTimer = null;
+    let connectDelayTimer = null;
+    let retryDelayMs = 1500;
 
     const connectWebSocket = () => {
       if (!isMounted) return;
-      const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws/movement`);
+      let ws;
+      try {
+        ws = new WebSocket(getWebSocketUrl());
+      } catch {
+        setSensorStream((prev) => ({ ...prev, wsStatus: 'disconnected' }));
+        reconnectTimer = setTimeout(connectWebSocket, retryDelayMs);
+        return;
+      }
       wsRef.current = ws;
 
       ws.onopen = () => {
-        if (isMounted) {
-          setSensorStream((prev) => ({ ...prev, wsStatus: 'connected' }));
-          ws.send(
-            JSON.stringify({
-              type: 'select_exercise',
-              exercise_key: selectedExerciseKeyRef.current,
-              exercise_id: activeExerciseRef.current.id,
-              limb_side: limbSideRef.current,
-            })
-          );
+        if (!isMounted) {
+          ws.close();
+          return;
         }
+        retryDelayMs = 1500;
+        wsTelemetryStatusRef.current = null;
+        lastWsTelemetryAtRef.current = 0;
+        setSensorStream((prev) => ({ ...prev, wsStatus: 'connected' }));
+        ws.send(
+          JSON.stringify({
+            type: 'select_exercise',
+            exercise_key: selectedExerciseKeyRef.current,
+            exercise_id: activeExerciseRef.current.id,
+            limb_side: limbSideRef.current,
+          })
+        );
       };
 
       ws.onerror = () => {
@@ -1452,105 +1655,9 @@ function App() {
           if (data.type === 'clinical_telemetry' && data.metrics) {
             streamCountersRef.current.packets += 1;
             streamCountersRef.current.lastPacketMs = performance.now();
-            setClinicalMetrics(data.metrics);
-
-            const activeLimits = safetyLimitsRef.current;
-            const sigVal =
-              (data.metrics.tracker || activeExerciseRef.current.tracker) === 'hands'
-                ? data.metrics.pinch_aperture || 0
-                : data.metrics.smoothed_angle || 0;
-            const evalThreshold = evaluateRomThreshold(
-              sigVal,
-              activeLimits,
-              data.metrics.status,
-              thresholdMonitoringEnabledRef.current
-            );
-
-            if (data.metrics.status === 'tracking') {
-              const nowMs = Date.now();
-              const rx = activePrescriptionRef.current;
-              const safeZoneOk =
-                sigVal >= rx.safeMin &&
-                sigVal <= rx.safeMax &&
-                (!data.metrics.alerts || data.metrics.alerts.length === 0);
-
-              setAdherenceCounters((prev) => ({
-                totalFrames: prev.totalFrames + 1,
-                safeZoneFrames: prev.safeZoneFrames + (safeZoneOk ? 1 : 0),
-              }));
-
-              const point = {
-                time: nowMs,
-                protocol: selectedExerciseKeyRef.current,
-                limbSide: limbSideRef.current,
-                angle: data.metrics.smoothed_angle,
-                pinchAperture: data.metrics.pinch_aperture || 0,
-                pinchMm: data.metrics.pinch_distance_mm || 0,
-                reps: data.metrics.reps,
-                jerk: data.metrics.jerk_score,
-                dtw: data.metrics.dtw_consistency,
-                thresholdState: evalThreshold.state,
-                safeZoneOk,
-                fatigueSummary: data.metrics.fatigue?.summary || '',
-                alerts: (data.metrics.alerts || []).join(' | '),
-              };
-              sessionLogRef.current.push(point);
-              setTelemetryCount(sessionLogRef.current.length);
-              setTelemetrySeries((prev) => {
-                const next = [...prev, point];
-                return next.length > 100 ? next.slice(-100) : next;
-              });
-
-              if (evalThreshold.severity === 'critical') {
-                if (lastBreachStateRef.current !== evalThreshold.state) {
-                  const timeLabel = new Date(nowMs).toLocaleTimeString([], {
-                    hour12: false,
-                  });
-                  setBreachStats((prev) => ({
-                    upperCount:
-                      prev.upperCount + (evalThreshold.state === 'exceeded_max' ? 1 : 0),
-                    lowerCount:
-                      prev.lowerCount + (evalThreshold.state === 'below_min' ? 1 : 0),
-                    lastEvent: `${evalThreshold.label} (${evalThreshold.value}${activeLimits.unit} @ ${timeLabel})`,
-                  }));
-                  speakFeedback(
-                    evalThreshold.state === 'exceeded_max'
-                      ? 'Caution. Range of motion exceeded maximum safety limit.'
-                      : 'Caution. Range of motion fell below minimum safety limit.'
-                  );
-                }
-
-                if (
-                  audioAlertEnabledRef.current &&
-                  nowMs - lastToneTimeRef.current >= 1200
-                ) {
-                  playThresholdAlertTone(evalThreshold.state, audioCtxRef);
-                  lastToneTimeRef.current = nowMs;
-                }
-              }
-              lastBreachStateRef.current = evalThreshold.state;
-            }
-
-            if (
-              data.metrics.reps > 0 &&
-              data.metrics.reps >= targetRepsRef.current &&
-              !targetGoalSpokenRef.current
-            ) {
-              targetGoalSpokenRef.current = true;
-              speakFeedback(`Target of ${targetRepsRef.current} repetitions reached.`);
-            } else if (data.metrics.reps > 0 && data.metrics.reps % 5 === 0) {
-              speakFeedback(`${data.metrics.reps} repetitions completed.`);
-            }
-
-            if (data.metrics.alerts && data.metrics.alerts.length > 0) {
-              const currentAlert = data.metrics.alerts[0];
-              if (currentAlert !== lastAlertSpoken.current) {
-                speakFeedback(`Warning: ${currentAlert}`);
-                lastAlertSpoken.current = currentAlert;
-              }
-            } else {
-              lastAlertSpoken.current = '';
-            }
+            wsTelemetryStatusRef.current = data.metrics.status || null;
+            lastWsTelemetryAtRef.current = performance.now();
+            ingestTelemetryMetrics(data.metrics, 'ws');
           }
         } catch (e) {
           console.error(e);
@@ -1559,20 +1666,33 @@ function App() {
 
       ws.onclose = () => {
         if (isMounted) {
+          wsTelemetryStatusRef.current = null;
+          lastWsTelemetryAtRef.current = 0;
           setSensorStream((prev) => ({ ...prev, wsStatus: 'reconnecting' }));
-          reconnectTimer = setTimeout(connectWebSocket, 1500);
+          reconnectTimer = setTimeout(connectWebSocket, retryDelayMs);
+          retryDelayMs = Math.min(retryDelayMs * 1.5, 8000);
         }
       };
     };
 
-    connectWebSocket();
+    // Short defer avoids StrictMode double-mount premature close errors
+    connectDelayTimer = setTimeout(connectWebSocket, 120);
 
     return () => {
       isMounted = false;
+      if (connectDelayTimer) clearTimeout(connectDelayTimer);
       if (reconnectTimer) clearTimeout(reconnectTimer);
-      if (wsRef.current) wsRef.current.close();
+      const activeWs = wsRef.current;
+      wsRef.current = null;
+      if (activeWs) {
+        if (activeWs.readyState === WebSocket.OPEN) {
+          activeWs.close();
+        } else if (activeWs.readyState === WebSocket.CONNECTING) {
+          activeWs.onopen = () => activeWs.close();
+        }
+      }
     };
-  }, [speakFeedback, wsReconnectNonce]);
+  }, [ingestTelemetryMetrics, wsReconnectNonce]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1709,7 +1829,6 @@ function App() {
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5 text-xs font-mono">
-
             <button
               type="button"
               onClick={() => setIsPaused((p) => !p)}

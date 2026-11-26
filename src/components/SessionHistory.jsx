@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { getApiUrl } from '../utils/backend';
 
 function SessionHistory({ patientId, refreshTrigger, onHistoryChanged, onSessionsLoaded }) {
   const [history, setHistory] = useState([]);
@@ -7,7 +8,7 @@ function SessionHistory({ patientId, refreshTrigger, onHistoryChanged, onSession
   const fetchHistory = useCallback(async () => {
     try {
       const id = encodeURIComponent(patientId || 'PT-1042');
-      const response = await fetch(`/api/history/${id}`);
+      const response = await fetch(getApiUrl(`/api/history/${id}`));
       const data = await response.json();
       if (Array.isArray(data)) {
         setHistory(data);
@@ -28,7 +29,7 @@ function SessionHistory({ patientId, refreshTrigger, onHistoryChanged, onSession
   const handleDeleteSession = async (sessionId) => {
     setDeletingId(sessionId);
     try {
-      const res = await fetch(`/api/history/${sessionId}`, { method: 'DELETE' });
+      const res = await fetch(getApiUrl(`/api/history/${sessionId}`), { method: 'DELETE' });
       if (res.ok) {
         setHistory((prev) => {
           const next = prev.filter((item) => item.id !== sessionId);
